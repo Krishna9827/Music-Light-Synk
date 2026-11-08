@@ -41,6 +41,9 @@ So I built it.
 You need a computer with `adb` ([platform-tools](https://developer.android.com/tools/releases/platform-tools))
 on the same Wi-Fi as the TV, just for the one-time setup.
 
+**On a Mac? Follow [docs/SETUP-MAC.md](docs/SETUP-MAC.md).** It's every step as copy-paste
+commands, with no script or git clone needed.
+
 1. **Get the APK.** Open the repo's **Actions** tab, then the latest *Build APK* run, then the
    artifact `music-light-synk-apk`. Unzip it to get `music-light-synk.apk`. If you push a tag
    like `v0.1.0`, the APK is also attached to a GitHub Release.
@@ -59,9 +62,10 @@ on the same Wi-Fi as the TV, just for the one-time setup.
    Accept the *"Allow USB debugging?"* prompt on the TV the first time.
 4. **Import the blueprint into Home Assistant.**
    [![Import blueprint](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2FKrishna9827%2FMusic-Light-Synk%2Fblob%2Fmain%2Fhome-assistant%2Fblueprints%2Fautomation%2Fmusic_light_synk.yaml)
-   The button works once this is on `main`. Otherwise copy
-   `home-assistant/blueprints/automation/music_light_synk.yaml` to
-   `/config/blueprints/automation/music_light_synk/` and reload automations.
+   The button only works if the repo is **public** and the file is on `main`. Otherwise (e.g. a
+   private repo) copy `home-assistant/blueprints/automation/music_light_synk.yaml` to
+   `/config/blueprints/automation/music_light_synk/` (the File editor add-on is easiest) and
+   reload automations.
    Then go to *Settings > Automations > Create automation > Music Light Synk*, keep the webhook
    ID `music_light_synk` (or change it in both places), and pick which lights get which corner.
 5. Play a song on the TV.
