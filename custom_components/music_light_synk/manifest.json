@@ -1,0 +1,15 @@
+{
+  "domain": "music_light_synk",
+  "name": "Music Light Synk",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": [
+    "webhook"
+  ],
+  "documentation": "https://github.com/Krishna9827/Music-Light-Synk",
+  "integration_type": "device",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/Krishna9827/Music-Light-Synk/issues",
+  "requirements": [],
+  "version": "0.4.0"
+}
