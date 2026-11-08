@@ -3,19 +3,129 @@
     "step": {
       "user": {
         "title": "Music Light Synk",
-        "description": "Creates colour entities from the Music Light Synk TV app. Then add this webhook ID to the app's \"Webhook ID(s)\" setting, comma separated, e.g. music_light_synk,music_light_synk_entities. Don't reuse the blueprint's webhook ID.",
+        "description": "Your lights follow the album art playing on your Fire TV / Android TV. The webhook ID must match the one set in the TV app (the app uses music_light_synk by default). If the Music Light Synk blueprint already uses that ID, either delete that automation first or pick another ID here and add it to the app.",
         "data": {
-          "name": "Name (e.g. Living room TV)",
+          "name": "Name",
           "webhook_id": "Webhook ID"
+        },
+        "data_description": {
+          "name": "E.g. Living room TV. Used for the device and entity names."
+        }
+      },
+      "lights": {
+        "title": "Which lights follow which part of the artwork?",
+        "description": "Pick lights for any zones you like and leave the rest empty. Everything else (brightness, WLED effects, what happens when the music stops) is under Configure afterwards.",
+        "data": {
+          "top_left_lights": "Top-left corner",
+          "top_lights": "Top edge (middle)",
+          "top_right_lights": "Top-right corner",
+          "left_lights": "Left edge (middle)",
+          "right_lights": "Right edge (middle)",
+          "bottom_left_lights": "Bottom-left corner",
+          "bottom_lights": "Bottom edge (middle)",
+          "bottom_right_lights": "Bottom-right corner",
+          "dominant_lights": "Dominant colour (whole artwork)",
+          "vibrant_lights": "Vibrant accent colour"
+        },
+        "data_description": {
+          "dominant_lights": "Best choice if you only have one or two lights.",
+          "vibrant_lights": "The most colourful part of the artwork."
         }
       }
     },
     "error": {
       "invalid_webhook_id": "Use 3-64 letters, numbers, - or _",
-      "webhook_in_use": "This webhook ID is already in use (probably by the blueprint automation). Pick another one."
+      "webhook_in_use": "This webhook ID is already in use (probably by the blueprint automation). Delete that automation or pick another ID."
     },
     "abort": {
       "already_configured": "This webhook ID is already set up"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Music Light Synk",
+        "sections": {
+          "lights": {
+            "name": "Lights",
+            "description": "Which lights follow which part of the artwork. Leave a zone empty to skip it.",
+            "data": {
+              "top_left_lights": "Top-left corner",
+              "top_lights": "Top edge (middle)",
+              "top_right_lights": "Top-right corner",
+              "left_lights": "Left edge (middle)",
+              "right_lights": "Right edge (middle)",
+              "bottom_left_lights": "Bottom-left corner",
+              "bottom_lights": "Bottom edge (middle)",
+              "bottom_right_lights": "Bottom-right corner",
+              "dominant_lights": "Dominant colour (whole artwork)",
+              "vibrant_lights": "Vibrant accent colour"
+            },
+            "data_description": {
+              "dominant_lights": "Best choice if you only have one or two lights.",
+              "vibrant_lights": "The most colourful part of the artwork."
+            }
+          },
+          "brightness": {
+            "name": "Brightness and fades",
+            "data": {
+              "brightness_mode": "Brightness",
+              "fixed_brightness": "Fixed brightness",
+              "max_brightness": "Maximum brightness (follow mode)",
+              "transition": "Fade time"
+            },
+            "data_description": {
+              "max_brightness": "Scales the artwork brightness down, e.g. 60 % for a cosy room.",
+              "transition": "Many Tuya bulbs ignore fades; 0 is fine for them."
+            }
+          },
+          "effects": {
+            "name": "Effects (WLED and other effect lights)",
+            "data": {
+              "effect_mode": "Effect",
+              "effect_name": "Effect name",
+              "palette_selects": "WLED colour palette entities",
+              "palette_option": "Palette option to use"
+            },
+            "data_description": {
+              "effect_mode": "Lights without effects (e.g. most Tuya bulbs) are never sent an effect.",
+              "effect_name": "Used with 'Run an effect'. Pick one or type any name your light lists; lights without it get a solid colour.",
+              "palette_selects": "Optional. Many WLED effects use their own palette; these selects are switched to the option below while an effect runs, and restored on stop."
+            }
+          },
+          "stop": {
+            "name": "When the music stops",
+            "data": {
+              "on_stop": "When playback stops"
+            },
+            "data_description": {
+              "on_stop": "The TV app reports 'stopped' after playback has been paused for the delay set in the app (15 s by default)."
+            }
+          }
+        }
+      }
+    }
+  },
+  "selector": {
+    "brightness_mode": {
+      "options": {
+        "follow": "Follow the artwork (dark art = dim lights)",
+        "fixed": "Fixed brightness"
+      }
+    },
+    "effect_mode": {
+      "options": {
+        "solid": "Solid colour - stop any running effect (recommended)",
+        "effect": "Run an effect in the artwork colours",
+        "keep": "Leave effects alone"
+      }
+    },
+    "on_stop": {
+      "options": {
+        "restore": "Restore the lights to how they were before the music",
+        "off": "Turn the lights off",
+        "nothing": "Leave them as they are"
+      }
     }
   }
 }

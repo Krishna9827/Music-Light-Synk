@@ -1,8 +1,10 @@
-"""Music Light Synk: colour entities fed by the Music Light Synk Android TV app.
+"""Music Light Synk: album-art colours from the Android TV app, straight onto your lights.
 
 The app POSTs a JSON payload to a Home Assistant webhook on every track change. This
-integration owns one webhook ID, keeps the latest payload, exposes it as entities and
-re-fires it on the event bus as ``music_light_synk_event``.
+integration owns that webhook and
+ - drives the lights you picked for each zone of the artwork (no blueprint needed),
+ - exposes the colours / now playing / playing as entities,
+ - re-fires every payload on the event bus as ``music_light_synk_event``.
 """
 
 from __future__ import annotations
@@ -21,16 +23,18 @@ from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .const import DOMAIN, EVENT_NAME, signal_update
+from .light_control import LightController
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR]
+PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.SWITCH, Platform.BUTTON]
 
 
 @dataclass
 class MusicLightSynkData:
     """Latest data received from the TV."""
 
+    lights: LightController
     payload: dict[str, Any] = field(default_factory=dict)
     colors: dict[str, Any] = field(default_factory=dict)
     playing: bool | None = None
@@ -52,7 +56,7 @@ type MusicLightSynkConfigEntry = ConfigEntry[MusicLightSynkData]
 
 async def async_setup_entry(hass: HomeAssistant, entry: MusicLightSynkConfigEntry) -> bool:
     """Register the webhook and set up entities."""
-    entry.runtime_data = MusicLightSynkData()
+    entry.runtime_data = MusicLightSynkData(lights=LightController(hass, lambda: entry.options))
     webhook_id: str = entry.data[CONF_WEBHOOK_ID]
 
     async def handle_webhook(
@@ -65,6 +69,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MusicLightSynkConfigEntr
         if not isinstance(data, dict):
             return web.Response(status=400, text="body must be a JSON object")
         entry.runtime_data.apply(data)
+        entry.runtime_data.lights.handle(data)
         async_dispatcher_send(hass, signal_update(entry.entry_id))
         hass.bus.async_fire(EVENT_NAME, {**data, "entry_id": entry.entry_id})
         return web.Response(status=200)
