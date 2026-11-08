@@ -10,13 +10,19 @@ import kotlin.math.roundToInt
 object HaClient {
     data class Result(val ok: Boolean, val code: Int, val message: String)
 
-    fun postJson(url: String, body: String, bearerToken: String? = null): Result {
+    fun postJson(
+        url: String,
+        body: String,
+        bearerToken: String? = null,
+        connectTimeoutMs: Int = 4000,
+        readTimeoutMs: Int = 5000,
+    ): Result {
         var conn: HttpURLConnection? = null
         return try {
             conn = (URL(url).openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
-                connectTimeout = 4000
-                readTimeout = 5000
+                connectTimeout = connectTimeoutMs
+                readTimeout = readTimeoutMs
                 doOutput = true
                 useCaches = false
                 setRequestProperty("Content-Type", "application/json; charset=utf-8")

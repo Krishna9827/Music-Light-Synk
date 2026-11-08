@@ -61,66 +61,71 @@ class AdbCommandReceiver : BroadcastReceiver() {
         }
     }
 
+    private class Opt(val key: String, val kind: Char, val apply: (Prefs, Any) -> String)
+
+    /** Every setting that can be changed over ADB: s = string, i = int, b = boolean. */
+    private val options: List<Opt> = listOf(
+        Opt("ha_url", 's') { p, v -> p.haUrl = v as String; p.haUrl },
+        Opt("webhook_id", 's') { p, v -> p.webhookId = v as String; p.webhookId },
+        Opt("token", 's') { p, v -> p.token = v as String; if (p.token.isBlank()) "cleared" else "set" },
+        Opt("source", 's') { p, v -> p.sourceMode = SourceMode.of(v as String); p.sourceMode.key },
+        Opt("packages", 's') { p, v -> p.allowedPackagesRaw = v as String; p.allowedPackagesRaw.ifEmpty { "(all)" } },
+        Opt("profiles", 's') { p, v -> p.profilesRaw = v as String; p.profilesRaw.ifEmpty { "(none)" } },
+        Opt("corner_pct", 'i') { p, v -> p.cornerPct = v as Int; "${p.cornerPct}" },
+        Opt("saturation_pct", 'i') { p, v -> p.saturationPct = v as Int; "${p.saturationPct}" },
+        Opt("min_brightness_pct", 'i') { p, v -> p.minBrightnessPct = v as Int; "${p.minBrightnessPct}" },
+        Opt("screen_interval", 'i') { p, v -> p.screenIntervalSec = v as Int; "${p.screenIntervalSec}" },
+        Opt("stop_delay", 'i') { p, v -> p.stopDelaySec = v as Int; "${p.stopDelaySec}" },
+        Opt("enabled", 'b') { p, v -> p.enabled = v as Boolean; "${p.enabled}" },
+        Opt("boot_capture", 'b') { p, v -> p.bootCapture = v as Boolean; "${p.bootCapture}" },
+        Opt("mqtt_enabled", 'b') { p, v -> p.mqttEnabled = v as Boolean; "${p.mqttEnabled}" },
+        Opt("mqtt_host", 's') { p, v -> p.mqttHost = v as String; p.mqttHost },
+        Opt("mqtt_port", 'i') { p, v -> p.mqttPort = v as Int; "${p.mqttPort}" },
+        Opt("mqtt_user", 's') { p, v -> p.mqttUser = v as String; if (p.mqttUser.isBlank()) "(none)" else "set" },
+        Opt("mqtt_pass", 's') { p, v -> p.mqttPassword = v as String; if (p.mqttPassword.isBlank()) "(none)" else "set" },
+        Opt("mqtt_topic", 's') { p, v -> p.mqttTopic = v as String; p.mqttTopic },
+        Opt("mqtt_discovery", 'b') { p, v -> p.mqttDiscovery = v as Boolean; "${p.mqttDiscovery}" },
+        Opt("mqtt_tls", 'b') { p, v -> p.mqttTls = v as Boolean; "${p.mqttTls}" },
+        Opt("wled_mode", 's') { p, v -> p.wledMode = WledMode.of(v as String); p.wledMode.key },
+        Opt("wled_hosts", 's') { p, v -> p.wledHostsRaw = v as String; p.wledHosts.joinToString(",").ifEmpty { "(none)" } },
+        Opt("wled_layout", 's') { p, v ->
+            p.wledLayoutRaw = v as String
+            if (WledLayout.parse(p.wledLayoutRaw, p.wledStart, p.wledClockwise) == null) "INVALID (use top,right,bottom,left)" else p.wledLayoutRaw
+        },
+        Opt("wled_start", 's') { p, v -> p.wledStart = Corner.of(v as String); p.wledStart.key },
+        Opt("wled_clockwise", 'b') { p, v -> p.wledClockwise = v as Boolean; "${p.wledClockwise}" },
+        Opt("wled_colors", 's') { p, v -> p.wledColorsRaw = v as String; p.wledConfig().colorSlots.joinToString(",") { it.key } },
+        Opt("wled_fx", 'i') { p, v -> p.wledFx = v as Int; "${p.wledFx}" },
+        Opt("wled_pal", 'i') { p, v -> p.wledPalette = v as Int; "${p.wledPalette}" },
+        Opt("wled_brightness_pct", 'i') { p, v -> p.wledBrightnessPct = v as Int; "${p.wledBrightnessPct}" },
+        Opt("wled_restore", 'b') { p, v -> p.wledRestore = v as Boolean; "${p.wledRestore}" },
+        Opt("pulse", 'b') { p, v -> p.pulseEnabled = v as Boolean; "${p.pulseEnabled}" },
+        Opt("pulse_strength", 'i') { p, v -> p.pulseStrengthPct = v as Int; "${p.pulseStrengthPct}" },
+    )
+
     private fun configure(ctx: Context, i: Intent): String {
         val p = Prefs(ctx)
         val changed = mutableListOf<String>()
-        i.getStringExtra("ha_url")?.let {
-            p.haUrl = it
-            changed += "ha_url=${p.haUrl}"
+        val bad = mutableListOf<String>()
+        for (opt in options) {
+            if (!i.hasExtra(opt.key)) continue
+            val value: Any? = when (opt.kind) {
+                's' -> stringExtra(i, opt.key)
+                'i' -> intExtra(i, opt.key)
+                else -> boolExtra(i, opt.key)
+            }
+            if (value == null) bad += opt.key else changed += "${opt.key}=${opt.apply(p, value)}"
         }
-        i.getStringExtra("webhook_id")?.let {
-            p.webhookId = it
-            changed += "webhook_id=${p.webhookId}"
-        }
-        i.getStringExtra("token")?.let {
-            p.token = it
-            changed += if (it.isBlank()) "token cleared" else "token set"
-        }
-        i.getStringExtra("source")?.let {
-            p.sourceMode = SourceMode.of(it)
-            changed += "source=${p.sourceMode.key}"
-        }
-        i.getStringExtra("packages")?.let {
-            p.allowedPackagesRaw = it
-            changed += "packages=${p.allowedPackagesRaw.ifEmpty { "(all)" }}"
-        }
-        intExtra(i, "corner_pct")?.let {
-            p.cornerPct = it
-            changed += "corner_pct=${p.cornerPct}"
-        }
-        intExtra(i, "saturation_pct")?.let {
-            p.saturationPct = it
-            changed += "saturation_pct=${p.saturationPct}"
-        }
-        intExtra(i, "min_brightness_pct")?.let {
-            p.minBrightnessPct = it
-            changed += "min_brightness_pct=${p.minBrightnessPct}"
-        }
-        intExtra(i, "screen_interval")?.let {
-            p.screenIntervalSec = it
-            changed += "screen_interval=${p.screenIntervalSec}"
-        }
-        intExtra(i, "stop_delay")?.let {
-            p.stopDelaySec = it
-            changed += "stop_delay=${p.stopDelaySec}"
-        }
-        boolExtra(i, "enabled")?.let {
-            p.enabled = it
-            changed += "enabled=$it"
-        }
-        boolExtra(i, "boot_capture")?.let {
-            p.bootCapture = it
-            changed += "boot_capture=$it"
-        }
-        if (changed.isEmpty()) {
-            return "Nothing changed. String extras: ha_url webhook_id token source(auto|artwork|screen) packages; " +
-                "numbers: corner_pct saturation_pct min_brightness_pct screen_interval stop_delay; " +
-                "booleans: enabled boot_capture"
+        if (changed.isEmpty() && bad.isEmpty()) {
+            return "Nothing changed. Options: " + options.joinToString(" ") { it.key }
         }
         SyncEngine.settingsChanged(ctx)
         SyncEngine.notifyUi()
-        return "Saved: " + changed.joinToString(", ")
+        return "Saved: " + changed.joinToString(", ") + if (bad.isEmpty()) "" else " | could not read: " + bad.joinToString(", ")
     }
+
+    @Suppress("DEPRECATION")
+    private fun stringExtra(i: Intent, key: String): String? = i.extras?.get(key)?.toString()
 
     private fun status(ctx: Context): String {
         val p = Prefs(ctx)
@@ -136,9 +141,14 @@ class AdbCommandReceiver : BroadcastReceiver() {
             "webhook_id=" + p.webhookId,
             "token=" + if (p.token.isBlank()) "(none)" else "set",
             "source=" + p.sourceMode.key,
+            "profiles=" + p.profilesRaw.ifEmpty { "(none)" },
+            "mqtt=" + if (p.isMqttConfigured) "${p.mqttHost}:${p.mqttPort} ${p.mqttTopic}" else "off",
+            "wled=" + if (p.isWledConfigured) "${p.wledMode.key} ${p.wledHosts.joinToString(",")}" else "off",
+            "pulse=" + p.pulseEnabled,
             "enabled=" + p.enabled,
             "now=" + s.nowPlaying,
             "last=" + s.lastResult,
+            "note=" + (s.note ?: "-"),
         ).joinToString(" | ")
     }
 

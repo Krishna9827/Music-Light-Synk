@@ -1,0 +1,21 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Music Light Synk",
+        "description": "Creates colour entities from the Music Light Synk TV app. Then add this webhook ID to the app's \"Webhook ID(s)\" setting, comma separated, e.g. music_light_synk,music_light_synk_entities. Don't reuse the blueprint's webhook ID.",
+        "data": {
+          "name": "Name (e.g. Living room TV)",
+          "webhook_id": "Webhook ID"
+        }
+      }
+    },
+    "error": {
+      "invalid_webhook_id": "Use 3-64 letters, numbers, - or _",
+      "webhook_in_use": "This webhook ID is already in use (probably by the blueprint automation). Pick another one."
+    },
+    "abort": {
+      "already_configured": "This webhook ID is already set up"
+    }
+  }
+}

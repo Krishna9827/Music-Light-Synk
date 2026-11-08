@@ -1,8 +1,10 @@
 package com.musiclightsynk
 
+import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -35,6 +37,8 @@ class MainActivity : Activity() {
     private lateinit var nowStatus: TextView
     private lateinit var resultStatus: TextView
     private lateinit var captureButton: Button
+    private lateinit var profileButton: Button
+    private lateinit var noteStatus: TextView
     private val fields = ArrayList<BoundField>()
     private val labelRefreshers = ArrayList<() -> Unit>()
     private val swatches = LinkedHashMap<Slot, TextView>()
@@ -95,7 +99,9 @@ class MainActivity : Activity() {
         captureStatus = text("", 15f, fg).also { left.addView(it) }
         captureButton = button("Start screen capture") { toggleCapture() }.also { left.addView(it) }
         nowStatus = text("", 14f, muted).also { left.addView(it) }
+        profileButton = button("Profile for this app") { cycleProfile() }.also { left.addView(it) }
         resultStatus = text("", 14f, muted).also { left.addView(it) }
+        noteStatus = text("", 13f, accent).also { left.addView(it) }
 
         header(left, "Last colours (laid out like your TV)")
         left.addView(previewGrid())
@@ -109,7 +115,7 @@ class MainActivity : Activity() {
         field(right, "Home Assistant URL", "http://192.168.1.10:8123",
             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI,
             { prefs.haUrl }, { prefs.haUrl = it })
-        field(right, "Webhook ID (same as in the blueprint)", Prefs.DEFAULT_WEBHOOK,
+        field(right, "Webhook ID(s), comma separated (blueprint, integration)", Prefs.DEFAULT_WEBHOOK,
             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS,
             { prefs.webhookId }, { prefs.webhookId = it.ifBlank { Prefs.DEFAULT_WEBHOOK } })
         field(right, "Long-lived token (optional, adds sensor.music_light_synk)", "optional",
@@ -132,6 +138,46 @@ class MainActivity : Activity() {
         right.addView(cycleButton({ "Restart screen capture after reboot: " + if (prefs.bootCapture) "ON" else "OFF" }) {
             prefs.bootCapture = !prefs.bootCapture
         })
+
+        header(right, "MQTT (optional)")
+        right.addView(cycleButton({ "MQTT: " + if (prefs.mqttEnabled) "ON" else "OFF" }) {
+            prefs.mqttEnabled = !prefs.mqttEnabled
+        })
+        field(right, "Broker host / IP", "192.168.1.10", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI,
+            { prefs.mqttHost }, { prefs.mqttHost = it })
+        field(right, "Port", "1883", InputType.TYPE_CLASS_NUMBER,
+            { prefs.mqttPort.toString() }, { v -> v.trim().toIntOrNull()?.let { prefs.mqttPort = it } })
+        field(right, "Username", "optional", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS,
+            { prefs.mqttUser }, { prefs.mqttUser = it })
+        field(right, "Password", "optional", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD,
+            { prefs.mqttPassword }, { prefs.mqttPassword = it })
+        field(right, "Topic prefix (one per TV)", Prefs.DEFAULT_MQTT_TOPIC, InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS,
+            { prefs.mqttTopic }, { prefs.mqttTopic = it })
+        right.addView(cycleButton({ "Home Assistant discovery: " + if (prefs.mqttDiscovery) "ON" else "OFF" }) {
+            prefs.mqttDiscovery = !prefs.mqttDiscovery
+        })
+        right.addView(button("Save MQTT") { saveFields(silent = false) })
+
+        header(right, "WLED direct (skips Home Assistant)")
+        right.addView(cycleButton({ "WLED: ${prefs.wledMode.label}" }) { prefs.wledMode = prefs.wledMode.next() })
+        field(right, "WLED IPs, comma separated", "192.168.1.60", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI,
+            { prefs.wledHostsRaw }, { prefs.wledHostsRaw = it })
+        field(right, "LED counts top,right,bottom,left (ambient)", "40,22,40,22", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS,
+            { prefs.wledLayoutRaw }, { prefs.wledLayoutRaw = it })
+        right.addView(cycleButton({ "Strip starts at: ${prefs.wledStart.label}" }) { prefs.wledStart = prefs.wledStart.next() })
+        right.addView(cycleButton({ "Strip direction: " + if (prefs.wledClockwise) "clockwise" else "counter-clockwise" }) {
+            prefs.wledClockwise = !prefs.wledClockwise
+        })
+        stepper(right, "WLED brightness", "%", 10, 10..100, { prefs.wledBrightnessPct }, { prefs.wledBrightnessPct = it })
+        right.addView(cycleButton({ "Restore WLED when music stops: " + if (prefs.wledRestore) "ON" else "OFF" }) {
+            prefs.wledRestore = !prefs.wledRestore
+        })
+        right.addView(cycleButton({ "Beat pulse (ambient mode): " + if (prefs.pulseEnabled) "ON" else "OFF" }) {
+            prefs.pulseEnabled = !prefs.pulseEnabled
+            if (prefs.pulseEnabled) ensureAudioPermission()
+        })
+        stepper(right, "Pulse strength", "%", 10, 10..100, { prefs.pulseStrengthPct }, { prefs.pulseStrengthPct = it })
+        right.addView(button("Save WLED") { saveFields(silent = false) })
 
         header(right, "Set up from a computer (ADB)")
         right.addView(text(ADB_HELP, 12f, muted).apply { typeface = Typeface.MONOSPACE; setTextIsSelectable(false) })
@@ -289,7 +335,7 @@ class MainActivity : Activity() {
         var changed = false
         for (f in fields) if (f.push()) changed = true
         if (changed) settingsTouched()
-        if (!silent) toast(if (prefs.isConfigured) "Saved" else "Saved - Home Assistant URL is still empty")
+        if (!silent) toast(if (prefs.hasOutput) "Saved" else "Saved - no output set up yet (Home Assistant, MQTT or WLED)")
     }
 
     private fun refreshStatus() {
@@ -314,6 +360,12 @@ class MainActivity : Activity() {
         val s = SyncEngine.status
         nowStatus.text = "Now: ${s.nowPlaying}"
         resultStatus.text = "Last: ${s.lastResult}"
+        noteStatus.text = s.note ?: ""
+        noteStatus.visibility = if (s.note.isNullOrEmpty()) View.GONE else View.VISIBLE
+        val pkg = s.nowPackage
+        profileButton.isEnabled = pkg != null
+        profileButton.text = if (pkg == null) "Per-app profile: play something first"
+        else "This app uses: ${prefs.profileFor(pkg).label}" + if (prefs.profileFor(pkg) == AppProfile.DEFAULT) " (${prefs.sourceMode.key})" else ""
 
         val palette = s.palette
         for ((slot, tv) in swatches) {
@@ -323,6 +375,29 @@ class MainActivity : Activity() {
             tv.background = swatchBackground(color)
             tv.text = "${slot.label}\n${c.hex}  ${palette[slot].brightnessPct}%"
             tv.setTextColor(if (c.luminance > 0.55f) Color.BLACK else Color.WHITE)
+        }
+    }
+
+    /** Cycle the per-app profile of whatever is playing: default -> artwork -> screen -> auto -> ignore. */
+    private fun cycleProfile() {
+        val pkg = SyncEngine.status.nowPackage ?: return
+        prefs.setProfile(pkg, prefs.profileFor(pkg).next())
+        refreshStatus()
+        settingsTouched()
+    }
+
+    private fun ensureAudioPermission() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 7)
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 7) {
+            val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+            toast(if (granted) "Audio access granted - beat pulse ready" else "Beat pulse needs audio access")
+            settingsTouched()
         }
     }
 

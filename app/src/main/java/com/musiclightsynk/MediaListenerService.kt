@@ -155,8 +155,13 @@ class MediaListenerService : NotificationListenerService() {
     }
 
     private fun publish() {
-        val allowed = Prefs(this).allowedPackages
-        val candidates = tracked.filter { allowed.isEmpty() || it.controller.packageName in allowed }
+        val prefs = Prefs(this)
+        val allowed = prefs.allowedPackages
+        // Apps whose per-app profile is "off" are invisible to us: e.g. ignore Netflix entirely.
+        val candidates = tracked.filter {
+            val pkg = it.controller.packageName
+            (allowed.isEmpty() || pkg in allowed) && prefs.profileFor(pkg) != AppProfile.OFF
+        }
         // getActiveSessions() is already ordered by priority; prefer whatever is actually playing.
         val chosen = candidates.firstOrNull { isActive(it.state) } ?: candidates.firstOrNull()
         SyncEngine.onNowPlaying(this, chosen?.let { toNowPlaying(it) })

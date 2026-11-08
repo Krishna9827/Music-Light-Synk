@@ -167,3 +167,54 @@ For a live log, run `adb logcat -s MusicLightSynk` (Ctrl+C to stop).
 2. **Blueprint:** open File editor → `blueprints/automation/music_light_synk/music_light_synk.yaml`,
    select all, paste the new version and **Save**. Then **Developer tools → YAML → Reload
    automations**. Open your automation to set any new options. Existing ones keep their values.
+
+## Optional extras (all copy-paste)
+
+These all go to the same receiver. `R` saves typing:
+
+```bash
+R="-f 0x20 -n com.musiclightsynk/.AdbCommandReceiver -a com.musiclightsynk.CONFIGURE"
+```
+
+**Per-app profiles** (YouTube from the screen, Spotify from album art, ignore Netflix):
+```bash
+adb shell am broadcast $R --es profiles "com.google.android.youtube.tv=screen;com.spotify.tv.android=artwork;com.netflix.ninja=off"
+```
+Or play something and press **"This app uses: ..."** on the TV to cycle through them.
+
+**WLED straight from the TV** (instant, no HA). Use your WLED's IP:
+```bash
+# album colours, WLED keeps its own effect
+adb shell am broadcast $R --es wled_mode colors --es wled_hosts 192.168.1.60
+# or: ambient gradient around the TV. LED counts top,right,bottom,left + where LED 0 is
+adb shell am broadcast $R --es wled_mode ambient --es wled_hosts 192.168.1.60 --es wled_layout 40,22,40,22 --es wled_start bottom_left --ez wled_clockwise true
+```
+If the same WLED is also in the blueprint, remove it there.
+
+**Beat pulse** (ambient mode only):
+```bash
+adb shell pm grant com.musiclightsynk android.permission.RECORD_AUDIO
+adb shell am broadcast $R --ez pulse true --ei pulse_strength 60
+```
+
+**MQTT** instead of (or as well as) the webhook:
+```bash
+adb shell am broadcast $R --ez mqtt_enabled true --es mqtt_host 192.168.1.10 --es mqtt_user YOUR_MQTT_USER --es mqtt_pass YOUR_MQTT_PASSWORD
+```
+Then add the blueprint `music_light_synk_mqtt.yaml` the same way as step 7 (same folder), and
+remove the webhook automation if you don't want both.
+
+**Colour entities in HA** (custom integration):
+1. In HA, **Settings → Add-ons → Samba share** → install, set a password, start.
+2. On the Mac, Finder → **Go → Connect to Server** → `smb://192.168.1.10` → open **config**.
+3. Create a `custom_components` folder if it's missing, and copy this repo's
+   `custom_components/music_light_synk` folder into it. Restart HA.
+4. **Settings → Devices & services → Add integration → Music Light Synk**. Name it e.g.
+   "Living room TV" and keep webhook ID `music_light_synk_entities`.
+5. Tell the app to send to both the blueprint and the integration:
+   ```bash
+   adb shell am broadcast $R --es webhook_id music_light_synk,music_light_synk_entities
+   ```
+
+Check everything with the `STATUS` command from step 8. It now also lists MQTT, WLED, pulse and
+profiles.

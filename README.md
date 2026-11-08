@@ -4,8 +4,12 @@ Your lights take on the colours of the album art playing on your **Fire TV / And
 
 A small TV app reads the album art of whatever is playing (Spotify, Amazon Music, Apple Music,
 YouTube, ...), extracts **4 corner + 4 side colours** (plus dominant / vibrant / average), and sends
-**one webhook to Home Assistant per track change**. A Home Assistant blueprint maps those
-colours to your lights.
+them **once per track change** to any mix of:
+
+- **Home Assistant** (webhook + blueprint, or MQTT + blueprint), which maps the colours to your lights,
+- the **Music Light Synk integration**, which gives you a colour sensor per zone for dashboards,
+- **WLED directly** over your LAN (instant, skips Home Assistant), as album colours or an ambient
+  gradient around the TV that can **pulse to the beat**.
 
 No Raspberry Pi, no HDMI grabber, and no continuous colour stream, so slow cloud bulbs like Tuya
 keep up.
@@ -71,6 +75,7 @@ commands, with no script or git clone needed.
 5. Play a song on the TV.
 
 If you only have one or two lights, put them under **Dominant colour**.
+Using MQTT instead of webhooks? Use `music_light_synk_mqtt.yaml` (see [MQTT](#mqtt)).
 
 ```
  artwork / TV screen          blueprint light groups
@@ -99,6 +104,108 @@ can choose instead:
 On "Restore", the previous effect and palette come back when the music stops. Lights without
 effects (most Tuya bulbs) are never sent an effect.
 
+## Extras
+
+All optional. They can be mixed: e.g. Tuya bulbs via Home Assistant **and** a WLED strip directly.
+
+### Per-app profiles
+
+Each app can have its own source: **Album art**, **Screen**, **Auto**, or **Ignore this app**.
+Play something, then press **"This app uses: ..."** in the TV app to cycle through them. Or set
+them over ADB:
+
+```bash
+adb shell am broadcast -n com.musiclightsynk/.AdbCommandReceiver -a com.musiclightsynk.CONFIGURE \
+  --es profiles "com.google.android.youtube.tv=screen;com.spotify.tv.android=artwork;com.netflix.ninja=off"
+```
+
+Ignored apps are invisible to the app. Starting Netflix after Spotify counts as "music stopped",
+so your lights get restored.
+
+### MQTT
+
+For people who'd rather use their broker than webhooks. The app has a tiny built-in MQTT 3.1.1
+client (user/password, optional TLS) and publishes:
+
+| Topic | Retained | What |
+|---|---|---|
+| `<prefix>/event` | no | every payload. The MQTT blueprint listens here |
+| `<prefix>/colors` | yes | last colours |
+| `<prefix>/state` | yes | playing / app / title / artist |
+| `<prefix>/availability` | yes | `online` / `offline` (last will) |
+
+The prefix defaults to `music_light_synk`. Give each TV its own, e.g. `music_light_synk/bedroom`.
+With **discovery** on (the default), Home Assistant creates a device with 11 colour sensors, a
+"Now playing" sensor and a "Playing" binary sensor automatically. To drive lights, use the
+**MQTT blueprint** `home-assistant/blueprints/automation/music_light_synk_mqtt.yaml`. It's identical
+to the webhook one but listens on `<prefix>/event`.
+
+```bash
+adb shell am broadcast -n com.musiclightsynk/.AdbCommandReceiver -a com.musiclightsynk.CONFIGURE \
+  --ez mqtt_enabled true --es mqtt_host 192.168.1.10 --es mqtt_user mqtt --es mqtt_pass secret
+```
+
+### WLED direct (skips Home Assistant)
+
+Talks to WLED straight over your Wi-Fi, so it's instant. Two modes:
+
+- **Colours** (`wled_mode colors`): sets WLED colours 1/2/3 (default: dominant, vibrant, average)
+  through the JSON API, so **WLED's own effects run in the album colours**. Optionally also pick
+  the effect (`wled_fx`, WLED effect ID) and palette (`wled_pal`, e.g. `5` = "Colors Only").
+  WLED's previous state is saved and restored when the music stops.
+- **Ambient gradient** (`wled_mode ambient`): for a strip around the TV. Paints a smooth gradient
+  through the 4 corner + 4 side colours and fades between tracks (UDP realtime / DNRGB). When the
+  music stops, the app stops sending and WLED goes back to its own effect by itself about a second
+  later.
+  Tell it how the strip runs: LED counts `top,right,bottom,left` (0 for a side without LEDs),
+  where LED 0 is, and the direction (as seen from the front):
+
+```bash
+adb shell am broadcast -n com.musiclightsynk/.AdbCommandReceiver -a com.musiclightsynk.CONFIGURE \
+  --es wled_mode ambient --es wled_hosts 192.168.1.60 --es wled_layout 40,22,40,22 \
+  --es wled_start bottom_left --ez wled_clockwise true
+```
+
+In WLED, *Config → Sync Interfaces → Realtime → "Receive UDP realtime"* must be on (it is by
+default). If the strip is also in the blueprint, remove it there so the two don't fight.
+
+**Beat pulse** (ambient mode only): the gradient pulses on the kick drum. It uses Android's
+`Visualizer` on the TV's audio output, so the app needs audio permission: turn it on in the app
+and accept the prompt, or run `adb shell pm grant com.musiclightsynk android.permission.RECORD_AUDIO`.
+It runs at ~30 fps over UDP, which is why it's WLED-only: Home Assistant and cloud bulbs can't
+keep up with that.
+Honest caveats: some devices or apps hand the Visualizer silence, and **HDMI passthrough**
+(Dolby/DTS bitstream to a soundbar) bypasses Android's mixer completely. The status line tells
+you if it only hears silence.
+
+```bash
+adb shell pm grant com.musiclightsynk android.permission.RECORD_AUDIO
+adb shell am broadcast -n com.musiclightsynk/.AdbCommandReceiver -a com.musiclightsynk.CONFIGURE \
+  --ez pulse true --ei pulse_strength 60
+```
+
+### Home Assistant integration (colour entities)
+
+`custom_components/music_light_synk` gives you a device per TV with:
+
+- 11 sensors such as `sensor.living_room_tv_top_left_colour`. The state is the hex colour; the
+  attributes are `rgb`, `hs`, `brightness`, `raw_hex` and more. They survive restarts.
+- `sensor.<tv>_now_playing` (title, or `idle`, plus app/artist/album attributes) and
+  `binary_sensor.<tv>_playing`.
+- a `music_light_synk_event` on the event bus for every payload, handy as an automation trigger.
+
+Install: copy the `custom_components/music_light_synk` folder into your HA `config/custom_components/`
+(Samba share or File editor), restart HA, then **Settings → Devices & services → Add integration →
+Music Light Synk**. It uses its **own** webhook ID (default `music_light_synk_entities`; it
+refuses the blueprint's), so add it to the app's webhook field, comma separated:
+
+```bash
+adb shell am broadcast -n com.musiclightsynk/.AdbCommandReceiver -a com.musiclightsynk.CONFIGURE \
+  --es webhook_id music_light_synk,music_light_synk_entities
+```
+
+(Using MQTT with discovery? Then you already have the same entities and don't need this.)
+
 ## Settings (on the TV app or over ADB)
 
 The settings screen works with the remote's D-pad. Every setting can also be set over ADB
@@ -107,7 +214,7 @@ The settings screen works with the remote's D-pad. Every setting can also be set
 | Setting | ADB extra | Default | Notes |
 |---|---|---|---|
 | Home Assistant URL | `ha_url` | – | `http://<ha-ip>:8123` |
-| Webhook ID | `webhook_id` | `music_light_synk` | Must match the blueprint |
+| Webhook ID(s) | `webhook_id` | `music_light_synk` | Must match the blueprint. Comma separate to send to several (blueprint + integration) |
 | Long-lived token | `token` | empty | Optional. If set, the app also updates `sensor.music_light_synk` (state = dominant hex, attributes = everything) for dashboards |
 | Source | `source` | `auto` | `auto` = album art, or the screen corners if the app gives no art. `artwork` = album art only. `screen` = screen corners only |
 | Edge / corner size | `corner_pct` | 25 % | Depth of the edge band that's sampled. Corners are squares of this size, sides are the band between them |
@@ -118,6 +225,19 @@ The settings screen works with the remote's D-pad. Every setting can also be set
 | Only these apps | `packages` | all | e.g. `com.spotify.tv.android,com.amazon.mp3` |
 | Syncing on/off | `enabled` | on | |
 | Restart capture after reboot | `boot_capture` | on | Only relevant for `auto`/`screen` |
+| Per-app profiles | `profiles` | none | `pkg=artwork\|screen\|auto\|off;pkg=...` |
+| MQTT on/off | `mqtt_enabled` | off | |
+| MQTT broker | `mqtt_host`, `mqtt_port`, `mqtt_user`, `mqtt_pass`, `mqtt_tls` | –, 1883 | |
+| MQTT topic prefix | `mqtt_topic` | `music_light_synk` | One per TV |
+| MQTT discovery | `mqtt_discovery` | on | Creates HA entities automatically |
+| WLED mode | `wled_mode` | `off` | `off` / `colors` / `ambient` |
+| WLED devices | `wled_hosts` | – | IPs, comma separated |
+| WLED strip layout | `wled_layout`, `wled_start`, `wled_clockwise` | –, `bottom_left`, true | Ambient mode. Counts `top,right,bottom,left` |
+| WLED colours 1/2/3 | `wled_colors` | `dominant,vibrant,average` | Colours mode. Any slot names |
+| WLED effect / palette | `wled_fx`, `wled_pal` | -1 (keep) | Colours mode. WLED IDs |
+| WLED brightness | `wled_brightness_pct` | 100 | Scales everything sent to WLED |
+| Restore WLED on stop | `wled_restore` | on | Colours mode |
+| Beat pulse | `pulse`, `pulse_strength` | off, 60 % | Ambient mode, needs audio permission |
 
 ### ADB cheat sheet
 
@@ -135,6 +255,8 @@ adb shell am start -n com.musiclightsynk/.CaptureConsentActivity   # (re)start s
 adb shell cmd notification allow_listener com.musiclightsynk/com.musiclightsynk.MediaListenerService
 adb shell appops set com.musiclightsynk PROJECT_MEDIA allow        # screen capture without a prompt
 adb shell appops set com.musiclightsynk SYSTEM_ALERT_WINDOW allow  # re-open capture after reboot
+
+adb shell pm grant com.musiclightsynk android.permission.RECORD_AUDIO  # only for beat pulse
 
 adb logcat -s MusicLightSynk                                        # live log
 ```
@@ -209,6 +331,10 @@ The app already sends at most one update per track. The rest of the lag is Tuya'
 | Nothing happens in Home Assistant | Run the `STATUS` broadcast. `HTTP 200` = HA got it, so check the automation trace. `ConnectException` = wrong URL/port |
 | Same colours for the next song | That's on purpose: if the art barely changes (same album), the app doesn't resend it |
 | Lights restore while music is playing | Raise "Send 'stopped' after" (some apps briefly pause between tracks) |
+| `MQTT broker refused connection: bad username or password` | Check `mqtt_user` / `mqtt_pass` (the app doesn't retry a refused login) |
+| WLED ambient does nothing | Check the layout is valid (`STATUS` shows it) and *Receive UDP realtime* is on in WLED |
+| "Beat pulse hears silence" | The device or app blocks audio analysis, or HDMI passthrough is on. Use PCM/stereo output to test |
+| Integration says the webhook ID is in use | You gave it the blueprint's ID. Use a different one, e.g. `music_light_synk_entities` |
 
 ## How it's built
 
@@ -224,13 +350,30 @@ The app already sends at most one update per track. The rest of the lag is Tuya'
 - `ScreenCaptureService`: optional fallback for apps without album art. MediaProjection into a
   160×90 `ImageReader`. Between captures the virtual display has **no surface**, so nothing is
   rendered while idle. It is not a continuous grabber.
-- Everything is plain Android framework code (no AndroidX), minSdk 25 (Fire OS 6+), targetSdk 34.
+- `Mqtt.kt`: a ~250-line MQTT 3.1.1 publisher (QoS 0, retain, last will, keep-alive) plus
+  Home Assistant discovery. No library.
+- `Wled.kt`: strip layout → per-LED gradient, DNRGB packets, a renderer thread (~30 fps while
+  fading or pulsing, 1 Hz keep-alive otherwise), the JSON API with save/restore, and the beat
+  detector (bass energy vs. a moving average).
+- `AudioPulse`: Android `Visualizer` on the output mix → beat detector → WLED renderer.
+- Everything is plain Android framework code (no AndroidX, no libraries), minSdk 25 (Fire OS 6+),
+  targetSdk 34. MQTT, WLED, colour extraction and payloads are framework-free Kotlin, so they
+  are unit tested on the JVM.
 
 ## Testing
 
-- `./gradlew testReleaseUnitTest`: colour extraction and payload schema tests (JVM).
-- CI (`.github/workflows/build.yml`) builds the signed APK and lints the blueprint
-  (`scripts/check_blueprint.py`).
+- `./gradlew testReleaseUnitTest`: 37 JVM tests. Colour extraction, payload schema, per-app
+  profiles, MQTT packets against a fake broker (connect, auth refusal, retained topics,
+  discovery), WLED layout orientation, DNRGB packets, the UDP renderer (fade in, stop, silence
+  after stop), the JSON save → set → restore flow against a fake WLED, and beat detection.
+- CI (`.github/workflows/build.yml`) builds the signed APK, checks both blueprints, checks the
+  MQTT blueprint is regenerated (`scripts/build_blueprints.py --check`) and byte-compiles the integration.
+- End to end against **real** Mosquitto 2.0 + Home Assistant 2026.2:
+  - The app's MQTT code logged in with a password and published. HA discovery created all 13
+    entities, the MQTT blueprint set the lights, and "stopped" turned them off.
+  - The custom integration was added through its config flow. It rejects bad IDs and the
+    blueprint's ID, and refuses duplicates. Its entities filled from a webhook payload, flipped
+    to idle/off on stop, and restored after a restart. The bus event reached an automation.
 - The blueprint was run against a real Home Assistant 2026.2 with demo lights, using the
   payloads the app's own code generates. Each corner and side landed on the right light with the right
   hs and brightness. "stopped" restored the original states and deleted the snapshot scene.
@@ -239,14 +382,12 @@ The app already sends at most one update per track. The rest of the lag is Tuya'
   running effect gets switched to solid, "run an effect" sets it (case-insensitive) plus the
   palette select, and "restore" brings back the old effect and palette. A repeated
   `session_start` doesn't overwrite the "before" snapshot.
-- Not yet tested on a physical Fire TV. Please report what your music apps do: does the status
-  line show album art, or "did not provide album art"?
+- Not covered by these tests: anything that needs the physical TV or a real WLED. That includes
+  whether the Fire TV `Visualizer` returns real audio, and the UDP/JSON packets on actual WLED
+  firmware (they follow the documented protocols).
 
 ## Ideas for later
 
-- MQTT transport, for people who prefer it over webhooks.
-- A direct WLED/UDP mode that skips Home Assistant entirely for LED strips (instant).
-- Beat "pulse" using Android's `Visualizer` API. It needs RECORD_AUDIO, so it's only for local
-  bulbs; cloud Tuya can't keep up.
-- Per-app profiles (e.g. screen mode for YouTube, artwork for Spotify).
-- A small HA custom integration that exposes the 4 colours as entities.
+- Hue Entertainment API output (fast, like WLED UDP, for Hue lights).
+- Per-app WLED mode (e.g. ambient for music, off for movies).
+- HACS install once the repo is public (the folder layout already fits).

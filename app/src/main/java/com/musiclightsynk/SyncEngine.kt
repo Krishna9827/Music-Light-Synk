@@ -16,7 +16,8 @@ import java.util.concurrent.CopyOnWriteArraySet
 /**
  * The brain. Decides *when* to send colours so the lights get one command per change
  * (new track / new artwork) instead of a continuous stream - which is what makes cloud
- * bulbs like Tuya lag.
+ * bulbs like Tuya lag. Then fans each update out to every configured output:
+ * Home Assistant webhook(s), MQTT, and WLED directly.
  *
  * All state below is only touched on the engine thread.
  */
@@ -25,15 +26,18 @@ object SyncEngine {
 
     /** Raw RGB distance below which two palettes count as "the same" (e.g. next song, same album). */
     private const val CHANGE_THRESHOLD = 18
+    private const val MQTT_KEEPALIVE_MS = 60_000L
 
     private const val SRC_ARTWORK = "artwork"
     private const val SRC_SCREEN = "screen"
 
     data class Status(
         val nowPlaying: String = "Nothing playing",
+        val nowPackage: String? = null,
         val lastResult: String = "Nothing sent yet",
         val palette: Palette? = null,
         val source: String? = null,
+        val note: String? = null,
     )
 
     private val thread = HandlerThread("mls-engine").apply { start() }
@@ -57,8 +61,24 @@ object SyncEngine {
     private var artCacheKey: String? = null
     private var artCachePalette: Palette? = null
 
+    private val mqtt = MqttBridge()
+    private val wled = WledController()
+    private var lastWledCfg: WledConfig? = null
+
+    /** Main thread only. */
+    private val pulse = AudioPulse(
+        onBeat = { wled.ambient.beat() },
+        onStatus = { msg -> handler.post { setStatus(status.copy(note = msg)) } },
+    )
+
     private val stopTask = Runnable { onStopTimeout() }
     private val pollTask = Runnable { onPoll() }
+    private val mqttKeepAlive = object : Runnable {
+        override fun run() {
+            mqtt.keepAlive()
+            if (mqtt.isConnected) handler.postDelayed(this, MQTT_KEEPALIVE_MS)
+        }
+    }
 
     // ---- public API (any thread) -------------------------------------------------------------
 
@@ -90,15 +110,19 @@ object SyncEngine {
             appCtx = app
             val prefs = Prefs(app)
             artCacheKey = null
+            if (!prefs.isMqttConfigured) mqtt.close()
+            if (!prefs.isWledConfigured) releaseWled()
             if (!prefs.enabled) {
                 handler.removeCallbacks(pollTask)
+                updatePulse(prefs, false)
                 return@post
             }
             val np = current
-            if (np != null && np.playing) {
+            if (np != null && np.playing && prefs.profileFor(np.packageName) != AppProfile.OFF) {
                 process(app, prefs, np, trackChanged = true, force = true)
-                schedulePoll(prefs)
+                schedulePoll(prefs, np)
             }
+            updatePulse(prefs, np?.playing == true)
         }
     }
 
@@ -109,7 +133,15 @@ object SyncEngine {
             val prefs = Prefs(app)
             val palette = ColorExtractor.testPalette(prefs.extractOptions())
             val json = Payloads.colors("test", "test", false, "test", current, palette, device)
-            val r = deliver(prefs, json)
+            // Idle: WLED shows the test for a few seconds, then goes back to what it was doing.
+            // During music: show the test, then put the music colours back.
+            val r = deliver(prefs, json, palette, sessionStart = false, preview = !sessionActive)
+            if (sessionActive) {
+                handler.postDelayed({
+                    val np = current
+                    if (np != null && np.playing && sessionActive) process(app, Prefs(app), np, trackChanged = false, force = true)
+                }, WledController.PREVIEW_MS)
+            }
             val msg = "Test colours -> ${r.message}"
             setStatus(status.copy(lastResult = stamp(msg), palette = palette, source = "test"))
             if (done != null) main.post { done(msg) }
@@ -121,14 +153,16 @@ object SyncEngine {
     private fun handleNowPlaying(ctx: Context, np: NowPlaying?) {
         val prefs = Prefs(ctx)
         current = np
-        setStatus(status.copy(nowPlaying = np?.describe() ?: "Nothing playing"))
+        setStatus(status.copy(nowPlaying = np?.describe() ?: "Nothing playing", nowPackage = np?.packageName))
         if (!prefs.enabled) {
             handler.removeCallbacks(pollTask)
+            updatePulse(prefs, false)
             return
         }
 
         if (np == null || !np.playing) {
             handler.removeCallbacks(pollTask)
+            updatePulse(prefs, false)
             if (sessionActive && !stopScheduled) {
                 stopScheduled = true
                 handler.postDelayed(stopTask, prefs.stopDelaySec * 1000L)
@@ -143,12 +177,13 @@ object SyncEngine {
         val trackChanged = np.trackKey != currentKey
         currentKey = np.trackKey
         process(ctx, prefs, np, trackChanged, force = false)
-        schedulePoll(prefs)
+        schedulePoll(prefs, np)
+        updatePulse(prefs, true)
     }
 
     private fun process(ctx: Context, prefs: Prefs, np: NowPlaying, trackChanged: Boolean, force: Boolean) {
         val opts = prefs.extractOptions()
-        val mode = prefs.sourceMode
+        val mode = prefs.sourceModeFor(np.packageName)
         var palette: Palette? = null
         var source: String? = null
 
@@ -185,7 +220,7 @@ object SyncEngine {
             return
         }
         val json = Payloads.colors("colors", reason, sessionStart, source, np, palette, device)
-        val r = deliver(prefs, json)
+        val r = deliver(prefs, json, palette, sessionStart, preview = false)
         if (r.ok) {
             lastSent = palette
             sessionActive = true
@@ -214,11 +249,11 @@ object SyncEngine {
         return if (p.isBlank) null else p
     }
 
-    private fun schedulePoll(prefs: Prefs) {
+    private fun schedulePoll(prefs: Prefs, np: NowPlaying) {
         handler.removeCallbacks(pollTask)
         val interval = prefs.screenIntervalSec
         if (interval <= 0) return
-        val mode = prefs.sourceMode
+        val mode = prefs.sourceModeFor(np.packageName)
         val usingScreen = mode == SourceMode.SCREEN || (mode == SourceMode.AUTO && lastSource == SRC_SCREEN)
         if (usingScreen) handler.postDelayed(pollTask, interval * 1000L)
     }
@@ -230,14 +265,14 @@ object SyncEngine {
         val prefs = Prefs(ctx)
         if (!prefs.enabled) return
         screenPalette(prefs.extractOptions())?.let { sendPalette(prefs, np, it, SRC_SCREEN, "screen_poll", force = false) }
-        schedulePoll(prefs)
+        schedulePoll(prefs, np)
     }
 
     private fun onStopTimeout() {
         stopScheduled = false
         val ctx = appCtx ?: return
         if (!sessionActive) return
-        val r = deliver(Prefs(ctx), Payloads.stopped(current, device))
+        val r = deliver(Prefs(ctx), Payloads.stopped(current, device), null, sessionStart = false, preview = false)
         sessionActive = false
         lastSent = null
         currentKey = null
@@ -245,27 +280,79 @@ object SyncEngine {
         setStatus(status.copy(lastResult = stamp("Playback stopped -> ${r.message}")))
     }
 
-    private fun deliver(prefs: Prefs, json: JSONObject): HaClient.Result {
-        if (!prefs.isConfigured) {
-            return HaClient.Result(false, 0, "not sent: set the Home Assistant URL and webhook ID first")
+    /** Beat pulse runs only while playing, in WLED ambient mode, with pulse switched on. */
+    private fun updatePulse(prefs: Prefs, playing: Boolean) {
+        val ctx = appCtx ?: return
+        val want = playing && prefs.enabled && prefs.pulseEnabled &&
+            prefs.isWledConfigured && prefs.wledMode == WledMode.AMBIENT
+        wled.ambient.setPulse(want, prefs.pulseStrengthPct / 100f)
+        main.post {
+            if (want && !pulse.isRunning) pulse.start(ctx) else if (!want && pulse.isRunning) pulse.stop()
         }
+    }
+
+    private fun releaseWled() {
+        lastWledCfg?.let { wled.release(it) }
+        lastWledCfg = null
+    }
+
+    /** Send one payload to every configured output. ok = at least one output accepted it. */
+    private fun deliver(prefs: Prefs, json: JSONObject, palette: Palette?, sessionStart: Boolean, preview: Boolean): HaClient.Result {
+        if (!prefs.hasOutput) {
+            return HaClient.Result(false, 0, "not sent: set up Home Assistant, MQTT or WLED first")
+        }
+        val parts = ArrayList<String>()
+        var ok = false
         val body = json.toString()
-        var r = HaClient.postJson(prefs.webhookUrl(), body)
-        if (!r.ok && r.code < 0) {
-            // One retry for flaky Wi-Fi (Fire TV radios like to nap).
-            SystemClock.sleep(800)
-            r = HaClient.postJson(prefs.webhookUrl(), body)
+        val stopped = json.optString("event") == "stopped"
+
+        if (prefs.isHaConfigured) {
+            val ids = prefs.webhookIds
+            for (id in ids) {
+                var r = HaClient.postJson(prefs.webhookUrl(id), body)
+                if (!r.ok && r.code < 0) {
+                    // One retry for flaky Wi-Fi (Fire TV radios like to nap).
+                    SystemClock.sleep(800)
+                    r = HaClient.postJson(prefs.webhookUrl(id), body)
+                }
+                if (r.ok) ok = true
+                parts += if (ids.size > 1) "$id: ${r.message}" else "HA ${r.message}"
+            }
+            val token = prefs.token
+            if (token.isNotBlank()) {
+                val s = HaClient.postJson(
+                    "${prefs.haUrl}/api/states/sensor.music_light_synk",
+                    Payloads.sensorState(json).toString(),
+                    token,
+                )
+                if (!s.ok) parts += "sensor ${s.message}"
+            }
         }
-        val token = prefs.token
-        if (token.isNotBlank()) {
-            val s = HaClient.postJson(
-                "${prefs.haUrl}/api/states/sensor.music_light_synk",
-                Payloads.sensorState(json).toString(),
-                token,
-            )
-            if (!s.ok) r = r.copy(message = "${r.message}; sensor ${s.message}")
+
+        if (prefs.isMqttConfigured) {
+            val r = mqtt.publish(prefs.mqttConfig(device, Build.MODEL ?: ""), json)
+            if (r.ok) {
+                ok = true
+                handler.removeCallbacks(mqttKeepAlive)
+                handler.postDelayed(mqttKeepAlive, MQTT_KEEPALIVE_MS)
+            }
+            parts += r.message
         }
-        return r
+
+        if (prefs.isWledConfigured) {
+            val cfg = prefs.wledConfig()
+            lastWledCfg = cfg
+            val r = when {
+                stopped -> wled.onStopped(cfg)
+                palette != null -> wled.onColors(cfg, palette, sessionStart, preview)
+                else -> null
+            }
+            if (r != null) {
+                if (r.ok) ok = true
+                parts += r.message
+            }
+        }
+        return HaClient.Result(ok, if (ok) 200 else -1, parts.joinToString(" | "))
     }
 
     private fun stamp(msg: String): String = "${timeFmt.format(Date())}  $msg"
