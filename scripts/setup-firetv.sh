@@ -87,7 +87,7 @@ if [[ "$SOURCE" != "artwork" ]]; then
   sleep 2
 fi
 
-step "Sending test colours (red / green / blue / amber)"
+step "Sending test colours (a rainbow around the edges, purple in the middle)"
 "${ADB[@]}" shell am broadcast -f 0x20 -n "$RECEIVER" -a "$PKG.TEST"
 
 step "Status"

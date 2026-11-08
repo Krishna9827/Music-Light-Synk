@@ -52,6 +52,35 @@ class ColorExtractorTest {
     }
 
     @Test
+    fun nineZonesMapToCornersSidesAndMiddle() {
+        // 60x60 image as a 3x3 grid of 20 px cells; a 1/3 band makes each slot exactly one cell.
+        val cells = arrayOf(
+            arrayOf(Rgb(230, 30, 30), Rgb(250, 140, 0), Rgb(250, 220, 50)),
+            arrayOf(Rgb(215, 25, 95), Rgb(140, 35, 170), Rgb(60, 160, 70)),
+            arrayOf(Rgb(55, 70, 170), Rgb(30, 135, 230), Rgb(0, 170, 190)),
+        )
+        val px = image(60, 60) { x, y -> cells[y / 20][x / 20].let { argb(it.r, it.g, it.b) } }
+        val p = ColorExtractor.extract(px, 60, 60, ExtractOptions(cornerFraction = 1f / 3f))
+        near(cells[0][0], p[Slot.TOP_LEFT].raw)
+        near(cells[0][1], p[Slot.TOP].raw)
+        near(cells[0][2], p[Slot.TOP_RIGHT].raw)
+        near(cells[1][0], p[Slot.LEFT].raw)
+        near(cells[1][2], p[Slot.RIGHT].raw)
+        near(cells[2][0], p[Slot.BOTTOM_LEFT].raw)
+        near(cells[2][1], p[Slot.BOTTOM].raw)
+        near(cells[2][2], p[Slot.BOTTOM_RIGHT].raw)
+    }
+
+    @Test
+    fun sidesFallBackToWholeEdgeWhenBandIsHalfTheImage() {
+        // Top half red, bottom half blue; with a 50 % band there is no "middle" of an edge.
+        val px = image(32, 32) { _, y -> if (y < 16) argb(220, 20, 20) else argb(20, 40, 220) }
+        val p = ColorExtractor.extract(px, 32, 32, ExtractOptions(cornerFraction = 0.5f))
+        near(Rgb(220, 20, 20), p[Slot.TOP].raw)
+        near(Rgb(20, 40, 220), p[Slot.BOTTOM].raw)
+    }
+
+    @Test
     fun horizontalGradientCornersFollowTheEdges() {
         // Blue on the left fading to orange on the right - a typical "gradient" cover.
         val px = image(64, 64) { x, _ ->
@@ -132,9 +161,16 @@ class ColorExtractorTest {
     }
 
     @Test
-    fun testPaletteHasFourDistinctCorners() {
-        val p = ColorExtractor.testPalette()
-        val corners = listOf(Slot.TOP_LEFT, Slot.TOP_RIGHT, Slot.BOTTOM_LEFT, Slot.BOTTOM_RIGHT).map { p[it].light.hex }
-        assertEquals(4, corners.toSet().size)
+    fun testPaletteHasEightDistinctEdgeColoursAndPurpleMiddle() {
+        for (corner in listOf(0.15f, 0.25f, 0.4f)) {
+            val p = ColorExtractor.testPalette(ExtractOptions(cornerFraction = corner))
+            val edges = listOf(
+                Slot.TOP_LEFT, Slot.TOP, Slot.TOP_RIGHT, Slot.LEFT,
+                Slot.RIGHT, Slot.BOTTOM_LEFT, Slot.BOTTOM, Slot.BOTTOM_RIGHT,
+            ).map { p[it].light.hex }
+            assertEquals("corner=$corner $edges", 8, edges.toSet().size)
+            // With thick bands the middle is smaller than a corner, so only check normal sizes.
+            if (corner <= 0.25f) near(Rgb(0x8E, 0x24, 0xAA), p[Slot.DOMINANT].raw)
+        }
     }
 }

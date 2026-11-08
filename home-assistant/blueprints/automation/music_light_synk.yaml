@@ -8,9 +8,13 @@ blueprint:
     (not a continuous stream), so even slow cloud bulbs such as Tuya keep up.
 
 
-    Map lights to the four corners of the artwork, to its dominant colour, or to its most
-    vibrant accent colour. Leave a group empty to skip it. One light can sit in several
-    groups, but then the last update wins.
+    Map lights to the 4 corners and 4 edges of the artwork (like an LED strip around a TV),
+    to its dominant colour, or to its most vibrant accent colour. Leave a group empty to skip
+    it. One light can sit in several groups, but then the last update wins.
+
+
+    WLED and other effect lights: by default any running effect is switched to a solid colour.
+    You can also run an effect (Running, Breathe, ...) in the artwork colours instead.
   domain: automation
   author: Music Light Synk
   source_url: https://github.com/Krishna9827/Music-Light-Synk/blob/main/home-assistant/blueprints/automation/music_light_synk.yaml
@@ -31,7 +35,15 @@ blueprint:
       icon: mdi:lightbulb-group
       input:
         top_left_lights:
-          name: Top-left colour
+          name: Top-left corner
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: light
+        top_lights:
+          name: Top edge (middle)
           default: []
           selector:
             entity:
@@ -39,7 +51,23 @@ blueprint:
               filter:
                 - domain: light
         top_right_lights:
-          name: Top-right colour
+          name: Top-right corner
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: light
+        left_lights:
+          name: Left edge (middle)
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: light
+        right_lights:
+          name: Right edge (middle)
           default: []
           selector:
             entity:
@@ -47,7 +75,15 @@ blueprint:
               filter:
                 - domain: light
         bottom_left_lights:
-          name: Bottom-left colour
+          name: Bottom-left corner
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: light
+        bottom_lights:
+          name: Bottom edge (middle)
           default: []
           selector:
             entity:
@@ -55,7 +91,7 @@ blueprint:
               filter:
                 - domain: light
         bottom_right_lights:
-          name: Bottom-right colour
+          name: Bottom-right corner
           default: []
           selector:
             entity:
@@ -80,6 +116,66 @@ blueprint:
               multiple: true
               filter:
                 - domain: light
+
+    effect_section:
+      name: Effects (WLED and other lights with effects)
+      icon: mdi:auto-fix
+      collapsed: true
+      input:
+        effect_mode:
+          name: Effect
+          description: >-
+            Lights without effects (e.g. most Tuya bulbs) are not affected by this setting.
+          default: solid
+          selector:
+            select:
+              options:
+                - label: Solid colour - stop any running effect (recommended)
+                  value: solid
+                - label: Run an effect in the artwork colours
+                  value: effect
+                - label: Leave effects alone (keep whatever is running)
+                  value: keep
+        effect_name:
+          name: Effect name
+          description: >-
+            Used with "Run an effect". Pick one or type any effect name exactly as your light
+            lists it. Lights that don't have this effect get a solid colour instead.
+          default: Running
+          selector:
+            select:
+              custom_value: true
+              options:
+                - Running
+                - Breathe
+                - Fade
+                - Scan
+                - Theater
+                - Twinkle
+                - Sparkle
+                - Chase
+                - Meteor
+                - Candle
+                - Heartbeat
+                - Ripple
+                - Glitter
+        effect_palette_selects:
+          name: WLED colour palette entities (optional)
+          description: >-
+            Many WLED effects use their own palette (often a rainbow). Add your WLED
+            "Color palette" select entities here and they are set to the option below while an
+            effect runs, so the effect uses the artwork colour. They are restored on stop.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: select
+        effect_palette_option:
+          name: Palette option to use
+          default: "* Color 1"
+          selector:
+            text: {}
 
     brightness_section:
       name: Brightness and fades
@@ -133,7 +229,7 @@ blueprint:
           name: When playback stops
           description: >-
             The TV app sends "stopped" after playback has been paused/stopped for the delay set
-            in the app (15 s by default).
+            in the app (15 s by default). "Restore" also brings back the previous WLED effect.
           default: restore
           selector:
             select:
@@ -164,10 +260,14 @@ triggers:
 conditions: !input only_when
 
 variables:
-  tl_lights: !input top_left_lights
-  tr_lights: !input top_right_lights
-  bl_lights: !input bottom_left_lights
-  br_lights: !input bottom_right_lights
+  top_left_lights: !input top_left_lights
+  top_lights: !input top_lights
+  top_right_lights: !input top_right_lights
+  left_lights: !input left_lights
+  right_lights: !input right_lights
+  bottom_left_lights: !input bottom_left_lights
+  bottom_lights: !input bottom_lights
+  bottom_right_lights: !input bottom_right_lights
   dominant_lights: !input dominant_lights
   vibrant_lights: !input vibrant_lights
   brightness_mode: !input brightness_mode
@@ -175,17 +275,21 @@ variables:
   max_brightness: !input max_brightness
   fade: !input transition
   on_stop: !input on_stop
+  effect_mode: !input effect_mode
+  effect_name: !input effect_name
+  palette_selects: !input effect_palette_selects
+  palette_option: !input effect_palette_option
   payload: "{{ trigger.json if (trigger.json is defined and trigger.json is mapping) else {} }}"
   event: "{{ payload.get('event', '') }}"
   colors: "{{ payload.get('colors', {}) if payload.get('colors') is mapping else {} }}"
   all_lights: >-
-    {{ (tl_lights + tr_lights + bl_lights + br_lights + dominant_lights + vibrant_lights)
+    {{ (top_left_lights + top_lights + top_right_lights + left_lights + right_lights + bottom_left_lights + bottom_lights + bottom_right_lights + dominant_lights + vibrant_lights)
        | unique | list }}
   snapshot_scene: scene.music_light_synk_before
   # brightness (0-255) for each colour slot, already adjusted for the chosen mode
   bri: >-
     {% set ns = namespace(out={}) %}
-    {% for key in ['top_left', 'top_right', 'bottom_left', 'bottom_right', 'dominant', 'vibrant'] %}
+    {% for key in ['top_left', 'top', 'top_right', 'left', 'right', 'bottom_left', 'bottom', 'bottom_right', 'dominant', 'vibrant'] %}
       {% set c = colors.get(key, {}) %}
       {% if brightness_mode == 'fixed' %}
         {% set b = (fixed_brightness * 2.55) | round(0) | int %}
@@ -195,6 +299,31 @@ variables:
       {% set ns.out = dict(ns.out, **{key: [1, [b, 255] | min] | max}) %}
     {% endfor %}
     {{ ns.out }}
+  # Which effect each effect-capable light needs, grouped into one call per effect name.
+  # Only lights whose effect_list contains the name, and whose current effect differs.
+  effect_jobs: >-
+    {% set solid_names = ['solid', 'none', 'off', 'static', 'normal'] %}
+    {% set ns = namespace(plan={}, jobs=[]) %}
+    {% if effect_mode in ['solid', 'effect'] %}
+      {% for e in all_lights %}
+        {% set fx = state_attr(e, 'effect_list') or [] %}
+        {% set low = fx | map('lower') | list %}
+        {% set pick = namespace(v=none) %}
+        {% if effect_mode == 'effect' and (effect_name | lower) in low %}
+          {% set pick.v = fx[low.index(effect_name | lower)] %}
+        {% endif %}
+        {% for s in solid_names if pick.v is none and s in low %}
+          {% set pick.v = fx[low.index(s)] %}
+        {% endfor %}
+        {% if pick.v is not none and state_attr(e, 'effect') != pick.v %}
+          {% set ns.plan = dict(ns.plan, **{pick.v: ns.plan.get(pick.v, []) + [e]}) %}
+        {% endif %}
+      {% endfor %}
+    {% endif %}
+    {% for k, v in ns.plan.items() %}
+      {% set ns.jobs = ns.jobs + [{'effect': k, 'lights': v}] %}
+    {% endfor %}
+    {{ ns.jobs }}
 
 actions:
   - choose:
@@ -222,48 +351,113 @@ actions:
       # ---------------------------------------------------------------- new colours
       - conditions: "{{ event in ['colors', 'test'] and colors | length > 0 }}"
         sequence:
+          # Snapshot "before music" once. Never overwrite an existing one with music colours
+          # (e.g. if the app repeats session_start after a Wi-Fi hiccup); it's deleted on restore.
           - if: >-
               {{ on_stop == 'restore' and payload.get('session_start', false)
-                 and all_lights | length > 0 }}
+                 and all_lights | length > 0
+                 and snapshot_scene not in (states.scene | map(attribute='entity_id') | list) }}
             then:
               - action: scene.create
                 data:
                   scene_id: music_light_synk_before
-                  snapshot_entities: "{{ all_lights }}"
+                  snapshot_entities: "{{ all_lights + palette_selects }}"
+          # WLED palettes first, so the effect starts in the artwork colour
+          - if: "{{ effect_mode == 'effect' and palette_selects | length > 0 }}"
+            then:
+              - repeat:
+                  for_each: "{{ palette_selects }}"
+                  sequence:
+                    - if: >-
+                        {{ palette_option in (state_attr(repeat.item, 'options') or [])
+                           and states(repeat.item) != palette_option }}
+                      then:
+                        - action: select.select_option
+                          continue_on_error: true
+                          target:
+                            entity_id: "{{ repeat.item }}"
+                          data:
+                            option: "{{ palette_option }}"
+          # Switch effects (e.g. WLED "Running" -> "Solid") before setting colours
+          - repeat:
+              for_each: "{{ effect_jobs }}"
+              sequence:
+                - action: light.turn_on
+                  continue_on_error: true
+                  target:
+                    entity_id: "{{ repeat.item.lights }}"
+                  data:
+                    effect: "{{ repeat.item.effect }}"
           # All groups at once: with cloud bulbs, sequential calls add up to visible lag.
           - parallel:
-              - if: "{{ tl_lights | length > 0 and 'top_left' in colors }}"
+              - if: "{{ top_left_lights | length > 0 and 'top_left' in colors }}"
                 then:
                   - action: light.turn_on
                     target:
-                      entity_id: "{{ tl_lights }}"
+                      entity_id: "{{ top_left_lights }}"
                     data:
                       hs_color: "{{ colors.top_left.hs }}"
                       brightness: "{{ bri.top_left }}"
                       transition: "{{ fade }}"
-              - if: "{{ tr_lights | length > 0 and 'top_right' in colors }}"
+              - if: "{{ top_lights | length > 0 and 'top' in colors }}"
                 then:
                   - action: light.turn_on
                     target:
-                      entity_id: "{{ tr_lights }}"
+                      entity_id: "{{ top_lights }}"
+                    data:
+                      hs_color: "{{ colors.top.hs }}"
+                      brightness: "{{ bri.top }}"
+                      transition: "{{ fade }}"
+              - if: "{{ top_right_lights | length > 0 and 'top_right' in colors }}"
+                then:
+                  - action: light.turn_on
+                    target:
+                      entity_id: "{{ top_right_lights }}"
                     data:
                       hs_color: "{{ colors.top_right.hs }}"
                       brightness: "{{ bri.top_right }}"
                       transition: "{{ fade }}"
-              - if: "{{ bl_lights | length > 0 and 'bottom_left' in colors }}"
+              - if: "{{ left_lights | length > 0 and 'left' in colors }}"
                 then:
                   - action: light.turn_on
                     target:
-                      entity_id: "{{ bl_lights }}"
+                      entity_id: "{{ left_lights }}"
+                    data:
+                      hs_color: "{{ colors.left.hs }}"
+                      brightness: "{{ bri.left }}"
+                      transition: "{{ fade }}"
+              - if: "{{ right_lights | length > 0 and 'right' in colors }}"
+                then:
+                  - action: light.turn_on
+                    target:
+                      entity_id: "{{ right_lights }}"
+                    data:
+                      hs_color: "{{ colors.right.hs }}"
+                      brightness: "{{ bri.right }}"
+                      transition: "{{ fade }}"
+              - if: "{{ bottom_left_lights | length > 0 and 'bottom_left' in colors }}"
+                then:
+                  - action: light.turn_on
+                    target:
+                      entity_id: "{{ bottom_left_lights }}"
                     data:
                       hs_color: "{{ colors.bottom_left.hs }}"
                       brightness: "{{ bri.bottom_left }}"
                       transition: "{{ fade }}"
-              - if: "{{ br_lights | length > 0 and 'bottom_right' in colors }}"
+              - if: "{{ bottom_lights | length > 0 and 'bottom' in colors }}"
                 then:
                   - action: light.turn_on
                     target:
-                      entity_id: "{{ br_lights }}"
+                      entity_id: "{{ bottom_lights }}"
+                    data:
+                      hs_color: "{{ colors.bottom.hs }}"
+                      brightness: "{{ bri.bottom }}"
+                      transition: "{{ fade }}"
+              - if: "{{ bottom_right_lights | length > 0 and 'bottom_right' in colors }}"
+                then:
+                  - action: light.turn_on
+                    target:
+                      entity_id: "{{ bottom_right_lights }}"
                     data:
                       hs_color: "{{ colors.bottom_right.hs }}"
                       brightness: "{{ bri.bottom_right }}"

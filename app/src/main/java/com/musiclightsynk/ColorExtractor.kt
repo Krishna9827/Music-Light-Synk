@@ -54,8 +54,12 @@ data class LightColor(
 
 enum class Slot(val key: String, val label: String) {
     TOP_LEFT("top_left", "Top left"),
+    TOP("top", "Top"),
     TOP_RIGHT("top_right", "Top right"),
+    LEFT("left", "Left"),
+    RIGHT("right", "Right"),
     BOTTOM_LEFT("bottom_left", "Bottom left"),
+    BOTTOM("bottom", "Bottom"),
     BOTTOM_RIGHT("bottom_right", "Bottom right"),
     DOMINANT("dominant", "Dominant"),
     VIBRANT("vibrant", "Vibrant"),
@@ -80,7 +84,10 @@ class Palette(private val colors: Map<Slot, LightColor>) {
 }
 
 data class ExtractOptions(
-    /** Size of each corner patch as a fraction of width/height (0.05..0.5). */
+    /**
+     * Depth of the edge band, as a fraction of width/height (0.05..0.5). Corners are
+     * cornerFraction x cornerFraction squares; the 4 sides are the parts of the band between them.
+     */
     val cornerFraction: Float = 0.25f,
     /** Multiplier applied to saturation of the bulb colour (1.0 = unchanged). */
     val saturationBoost: Float = 1.3f,
@@ -101,17 +108,40 @@ object ColorExtractor {
         val cw = max(1, (width * f).roundToInt())
         val ch = max(1, (height * f).roundToInt())
 
+        // Middle part of each edge, between the corners. With a 50 % band there is nothing
+        // between the corners, so the side falls back to the whole edge.
+        var sx0 = cw
+        var sx1 = width - cw
+        if (sx1 <= sx0) {
+            sx0 = 0
+            sx1 = width
+        }
+        var sy0 = ch
+        var sy1 = height - ch
+        if (sy1 <= sy0) {
+            sy0 = 0
+            sy1 = height
+        }
+
         val tl = Histogram.of(pixels, width, 0, 0, cw, ch)
         val tr = Histogram.of(pixels, width, width - cw, 0, width, ch)
         val bl = Histogram.of(pixels, width, 0, height - ch, cw, height)
         val br = Histogram.of(pixels, width, width - cw, height - ch, width, height)
+        val top = Histogram.of(pixels, width, sx0, 0, sx1, ch)
+        val bottom = Histogram.of(pixels, width, sx0, height - ch, sx1, height)
+        val left = Histogram.of(pixels, width, 0, sy0, cw, sy1)
+        val right = Histogram.of(pixels, width, width - cw, sy0, width, sy1)
         val all = Histogram.of(pixels, width, 0, 0, width, height)
 
         val dominant = all.dominant()
         val map = linkedMapOf(
             Slot.TOP_LEFT to toLight(tl.dominant(), opts),
+            Slot.TOP to toLight(top.dominant(), opts),
             Slot.TOP_RIGHT to toLight(tr.dominant(), opts),
+            Slot.LEFT to toLight(left.dominant(), opts),
+            Slot.RIGHT to toLight(right.dominant(), opts),
             Slot.BOTTOM_LEFT to toLight(bl.dominant(), opts),
+            Slot.BOTTOM to toLight(bottom.dominant(), opts),
             Slot.BOTTOM_RIGHT to toLight(br.dominant(), opts),
             Slot.DOMINANT to toLight(dominant, opts),
             Slot.VIBRANT to toLight(all.vibrant() ?: dominant, opts),
@@ -120,20 +150,32 @@ object ColorExtractor {
         return Palette(map)
     }
 
-    /** Fixed red / green / blue / amber palette used by the "send test" buttons. */
+    /**
+     * Fixed test image used by the "send test" buttons: a rainbow around the edge
+     * (each corner and side a different colour) and purple in the middle.
+     */
     fun testPalette(opts: ExtractOptions = ExtractOptions()): Palette {
-        val w = 32
-        val h = 32
-        val px = IntArray(w * h)
-        for (y in 0 until h) for (x in 0 until w) {
-            px[y * w + x] = when {
-                x < w / 2 && y < h / 2 -> 0xFFE53935.toInt() // red
-                y < h / 2 -> 0xFF43A047.toInt() // green
-                x < w / 2 -> 0xFF1E88E5.toInt() // blue
-                else -> 0xFFFFB300.toInt() // amber
+        val n = 40
+        val band = (n * opts.cornerFraction.coerceIn(0.05f, 0.5f)).roundToInt().coerceIn(1, n / 2)
+        val px = IntArray(n * n)
+        for (y in 0 until n) for (x in 0 until n) {
+            val left = x < band
+            val right = x >= n - band
+            val top = y < band
+            val bottom = y >= n - band
+            px[y * n + x] = when {
+                top && left -> 0xFFE53935.toInt() // red
+                top && right -> 0xFFFDD835.toInt() // yellow
+                bottom && left -> 0xFF3949AB.toInt() // indigo
+                bottom && right -> 0xFF00ACC1.toInt() // cyan
+                top -> 0xFFFB8C00.toInt() // orange
+                bottom -> 0xFF1E88E5.toInt() // blue
+                left -> 0xFFD81B60.toInt() // pink
+                right -> 0xFF43A047.toInt() // green
+                else -> 0xFF8E24AA.toInt() // purple (dominant)
             }
         }
-        return extract(px, w, h, opts)
+        return extract(px, n, n, opts)
     }
 
     fun toLight(raw: Rgb, opts: ExtractOptions): LightColor {

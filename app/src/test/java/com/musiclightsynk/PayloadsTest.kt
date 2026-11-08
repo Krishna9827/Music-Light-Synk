@@ -38,9 +38,12 @@ class PayloadsTest {
             assertTrue(hs.getDouble(1) in 0.0..100.0)
             assertTrue(c.getInt("brightness") in 1..255)
         }
-        // Test palette: top-left is red, top-right green
+        assertEquals(11, colors.length())
+        // Test palette: top-left red, top orange, right green, bottom blue
         assertTrue(colors.getJSONObject("top_left").getJSONArray("hs").getDouble(0) < 10.0)
-        assertTrue(colors.getJSONObject("top_right").getJSONArray("hs").getDouble(0) in 100.0..140.0)
+        assertTrue(colors.getJSONObject("top").getJSONArray("hs").getDouble(0) in 25.0..40.0)
+        assertTrue(colors.getJSONObject("right").getJSONArray("hs").getDouble(0) in 110.0..135.0)
+        assertTrue(colors.getJSONObject("bottom").getJSONArray("hs").getDouble(0) in 200.0..215.0)
         writeSample("colors.json", json)
     }
 

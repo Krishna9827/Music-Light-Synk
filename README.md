@@ -3,7 +3,7 @@
 Your lights take on the colours of the album art playing on your **Fire TV / Android TV**.
 
 A small TV app reads the album art of whatever is playing (Spotify, Amazon Music, Apple Music,
-YouTube, ...), extracts **4 corner colours** (plus dominant / vibrant / average), and sends
+YouTube, ...), extracts **4 corner + 4 side colours** (plus dominant / vibrant / average), and sends
 **one webhook to Home Assistant per track change**. A Home Assistant blueprint maps those
 colours to your lights.
 
@@ -14,7 +14,7 @@ keep up.
  Spotify / Amazon Music / YouTube ... on the Fire TV
         |  Android media session: title, artist, album art (no screen recording needed)
         v
- Music Light Synk app  --  4 corners + dominant + vibrant  -->  1 HTTP POST per track
+ Music Light Synk app  --  4 corners + 4 sides + dominant  -->  1 HTTP POST per track
         |                                                       (LAN webhook, ~50 ms)
         v
  Home Assistant blueprint  -->  light.turn_on for every group in parallel  -->  Tuya / Hue / WLED / ...
@@ -67,10 +67,37 @@ commands, with no script or git clone needed.
    `/config/blueprints/automation/music_light_synk/` (the File editor add-on is easiest) and
    reload automations.
    Then go to *Settings > Automations > Create automation > Music Light Synk*, keep the webhook
-   ID `music_light_synk` (or change it in both places), and pick which lights get which corner.
+   ID `music_light_synk` (or change it in both places), and pick which lights get which corner / side.
 5. Play a song on the TV.
 
 If you only have one or two lights, put them under **Dominant colour**.
+
+```
+ artwork / TV screen          blueprint light groups
+ +-----+---------+-----+
+ | TL  |   Top   | TR  |      Top-left, Top edge, Top-right,
+ +-----+---------+-----+      Left edge, Right edge,
+ |Left | dominant|Right|      Bottom-left, Bottom edge, Bottom-right,
+ +-----+---------+-----+      Dominant (whole artwork), Vibrant (accent)
+ | BL  | Bottom  | BR  |
+ +-----+---------+-----+
+```
+
+### WLED and other effect lights
+
+By default the blueprint **switches any running effect to a solid colour**. Otherwise WLED keeps
+running e.g. "Running" and only changes its colour. In the blueprint's **Effects** section you
+can choose instead:
+
+- **Run an effect in the artwork colours**: pick one (Running, Breathe, Fade, Scan, Twinkle,
+  Meteor, ...) or type any name your light lists. Lights without that effect get a solid colour.
+  Many WLED effects use their own palette (often a rainbow). Add your WLED *Color palette*
+  select entities, and they're switched to `* Color 1` while the effect runs, so it uses the
+  album colour.
+- **Leave effects alone**: the old behaviour.
+
+On "Restore", the previous effect and palette come back when the music stops. Lights without
+effects (most Tuya bulbs) are never sent an effect.
 
 ## Settings (on the TV app or over ADB)
 
@@ -83,7 +110,7 @@ The settings screen works with the remote's D-pad. Every setting can also be set
 | Webhook ID | `webhook_id` | `music_light_synk` | Must match the blueprint |
 | Long-lived token | `token` | empty | Optional. If set, the app also updates `sensor.music_light_synk` (state = dominant hex, attributes = everything) for dashboards |
 | Source | `source` | `auto` | `auto` = album art, or the screen corners if the app gives no art. `artwork` = album art only. `screen` = screen corners only |
-| Corner patch size | `corner_pct` | 25 % | How much of each corner is sampled |
+| Edge / corner size | `corner_pct` | 25 % | Depth of the edge band that's sampled. Corners are squares of this size, sides are the band between them |
 | Saturation boost | `saturation_pct` | 130 % | Bulbs look washed out without it |
 | Minimum brightness | `min_brightness_pct` | 15 % | Brightness for black artwork |
 | Re-sample screen every | `screen_interval` | 0 s | 0 = once per track. Set to e.g. 5 to also follow videos (only used in screen mode) |
@@ -100,7 +127,7 @@ R="-n com.musiclightsynk/.AdbCommandReceiver"
 
 # configure (any subset of the extras above)
 adb shell am broadcast $R -a com.musiclightsynk.CONFIGURE --es ha_url http://192.168.1.10:8123 --es source artwork --ei corner_pct 30
-adb shell am broadcast $R -a com.musiclightsynk.TEST      # red/green/blue/amber test colours
+adb shell am broadcast $R -a com.musiclightsynk.TEST      # rainbow test colours around the "screen"
 adb shell am broadcast $R -a com.musiclightsynk.STATUS    # access granted? last result? now playing?
 adb shell am start -n com.musiclightsynk/.CaptureConsentActivity   # (re)start screen capture
 
@@ -137,7 +164,8 @@ your token.
       "hex": "#FF0600", "rgb": [255, 6, 0],          // bulb colour (full value, saturation boosted)
       "raw_hex": "#E53935", "raw_rgb": [229, 57, 53] // what the artwork actually looks like
     },
-    "top_right": {}, "bottom_left": {}, "bottom_right": {},
+    "top": {}, "top_right": {}, "left": {}, "right": {},
+    "bottom_left": {}, "bottom": {}, "bottom_right": {},
     "dominant": {}, "vibrant": {}, "average": {}
   }
 }
@@ -169,7 +197,7 @@ The app already sends at most one update per track. The rest of the lag is Tuya'
   Tuya's cloud and its rate limits. This is the biggest improvement you can make.
 - Set the blueprint **fade time to 0** for Tuya bulbs, because most of them ignore fades anyway.
 - Don't put the same bulb in two groups, or it gets two commands per track.
-- The blueprint updates all groups **in parallel**, so 4 corners cost the same time as 1.
+- The blueprint updates all groups **in parallel**, so 8 zones cost the same time as 1.
 
 ## Troubleshooting
 
@@ -187,7 +215,7 @@ The app already sends at most one update per track. The rest of the lag is Tuya'
 - `MediaListenerService`: a `NotificationListenerService`, used only because Android limits
   other apps' media sessions (`MediaSessionManager.getActiveSessions`) to notification
   listeners. The system keeps a granted listener bound, so Fire OS doesn't kill it.
-- `ColorExtractor`: pure Kotlin, unit tested. For each corner it finds a "smoothed mode"
+- `ColorExtractor`: pure Kotlin, unit tested. For each corner / side it finds a "smoothed mode"
   (4-bit histogram, densest 3×3×3 neighbourhood). That handles gradients and ignores small logos
   better than a plain average. Colours become bulb-friendly HS at full value, with darkness
   moved into `brightness`.
@@ -204,10 +232,13 @@ The app already sends at most one update per track. The rest of the lag is Tuya'
 - CI (`.github/workflows/build.yml`) builds the signed APK and lints the blueprint
   (`scripts/check_blueprint.py`).
 - The blueprint was run against a real Home Assistant 2026.2 with demo lights, using the
-  payloads the app's own code generates. Each corner landed on the right light with the right
+  payloads the app's own code generates. Each corner and side landed on the right light with the right
   hs and brightness. "stopped" restored the original states and deleted the snapshot scene.
   Fixed brightness, "turn off on stop", extra conditions, junk bodies and the
-  `sensor.music_light_synk` REST mirror all behaved correctly.
+  `sensor.music_light_synk` REST mirror all behaved correctly. Effects were tested too: a
+  running effect gets switched to solid, "run an effect" sets it (case-insensitive) plus the
+  palette select, and "restore" brings back the old effect and palette. A repeated
+  `session_start` doesn't overwrite the "before" snapshot.
 - Not yet tested on a physical Fire TV. Please report what your music apps do: does the status
   line show album art, or "did not provide album art"?
 

@@ -76,7 +76,7 @@ if ($Source -ne "artwork") {
     Start-Sleep -Seconds 2
 }
 
-Step "Sending test colours (red / green / blue / amber)"
+Step "Sending test colours (a rainbow around the edges, purple in the middle)"
 Tv shell am broadcast -f 0x20 -n $Receiver -a "$Pkg.TEST" | Out-Host
 
 Step "Status"

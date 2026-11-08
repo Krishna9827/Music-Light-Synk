@@ -10,81 +10,141 @@
   "colors": {
     "top_right": {
       "raw_rgb": [
-        67,
-        160,
-        71
+        253,
+        216,
+        53
       ],
-      "raw_hex": "#43A047",
-      "brightness": 174,
-      "hex": "#3EFF47",
+      "raw_hex": "#FDD835",
+      "brightness": 253,
+      "hex": "#FFD000",
       "hs": [
-        122.6,
-        75.6
-      ],
-      "rgb": [
-        62,
-        255,
-        71
-      ],
-      "brightness_pct": 68
-    },
-    "average": {
-      "raw_rgb": [
-        145,
-        133,
-        88
-      ],
-      "raw_hex": "#918558",
-      "brightness": 162,
-      "hex": "#FFE47D",
-      "hs": [
-        47.4,
-        51.1
-      ],
-      "rgb": [
-        255,
-        228,
-        125
-      ],
-      "brightness_pct": 64
-    },
-    "vibrant": {
-      "raw_rgb": [
-        255,
-        179,
-        0
-      ],
-      "raw_hex": "#FFB300",
-      "brightness": 255,
-      "hex": "#FFB300",
-      "hs": [
-        42.1,
+        48.9,
         100
       ],
       "rgb": [
         255,
-        179,
+        208,
         0
       ],
-      "brightness_pct": 100
+      "brightness_pct": 99
     },
-    "dominant": {
+    "average": {
       "raw_rgb": [
-        229,
-        57,
-        53
+        139,
+        99,
+        121
       ],
-      "raw_hex": "#E53935",
-      "brightness": 233,
-      "hex": "#FF0600",
+      "raw_hex": "#8B6379",
+      "brightness": 156,
+      "hex": "#FFA0D4",
       "hs": [
-        1.4,
-        99.9
+        327,
+        37.4
       ],
       "rgb": [
         255,
-        6,
+        160,
+        212
+      ],
+      "brightness_pct": 61
+    },
+    "vibrant": {
+      "raw_rgb": [
+        251,
+        140,
         0
+      ],
+      "raw_hex": "#FB8C00",
+      "brightness": 252,
+      "hex": "#FF8E00",
+      "hs": [
+        33.5,
+        100
+      ],
+      "rgb": [
+        255,
+        142,
+        0
+      ],
+      "brightness_pct": 99
+    },
+    "top": {
+      "raw_rgb": [
+        251,
+        140,
+        0
+      ],
+      "raw_hex": "#FB8C00",
+      "brightness": 252,
+      "hex": "#FF8E00",
+      "hs": [
+        33.5,
+        100
+      ],
+      "rgb": [
+        255,
+        142,
+        0
+      ],
+      "brightness_pct": 99
+    },
+    "dominant": {
+      "raw_rgb": [
+        142,
+        36,
+        170
+      ],
+      "raw_hex": "#8E24AA",
+      "brightness": 183,
+      "hex": "#CA00FF",
+      "hs": [
+        287.5,
+        100
+      ],
+      "rgb": [
+        202,
+        0,
+        255
+      ],
+      "brightness_pct": 72
+    },
+    "left": {
+      "raw_rgb": [
+        216,
+        27,
+        96
+      ],
+      "raw_hex": "#D81B60",
+      "brightness": 222,
+      "hex": "#FF005D",
+      "hs": [
+        338.1,
+        100
+      ],
+      "rgb": [
+        255,
+        0,
+        93
+      ],
+      "brightness_pct": 87
+    },
+    "bottom": {
+      "raw_rgb": [
+        30,
+        136,
+        229
+      ],
+      "raw_hex": "#1E88E5",
+      "brightness": 233,
+      "hex": "#0088FF",
+      "hs": [
+        208,
+        100
+      ],
+      "rgb": [
+        0,
+        136,
+        255
       ],
       "brightness_pct": 91
     },
@@ -110,47 +170,67 @@
     },
     "bottom_right": {
       "raw_rgb": [
-        255,
-        179,
-        0
+        0,
+        172,
+        193
       ],
-      "raw_hex": "#FFB300",
-      "brightness": 255,
-      "hex": "#FFB300",
+      "raw_hex": "#00ACC1",
+      "brightness": 202,
+      "hex": "#00E3FF",
       "hs": [
-        42.1,
-        100
-      ],
-      "rgb": [
-        255,
-        179,
-        0
-      ],
-      "brightness_pct": 100
-    },
-    "bottom_left": {
-      "raw_rgb": [
-        30,
-        136,
-        229
-      ],
-      "raw_hex": "#1E88E5",
-      "brightness": 233,
-      "hex": "#0088FF",
-      "hs": [
-        208,
+        186.5,
         100
       ],
       "rgb": [
         0,
-        136,
+        227,
         255
       ],
-      "brightness_pct": 91
+      "brightness_pct": 79
+    },
+    "right": {
+      "raw_rgb": [
+        67,
+        160,
+        71
+      ],
+      "raw_hex": "#43A047",
+      "brightness": 174,
+      "hex": "#3EFF47",
+      "hs": [
+        122.6,
+        75.6
+      ],
+      "rgb": [
+        62,
+        255,
+        71
+      ],
+      "brightness_pct": 68
+    },
+    "bottom_left": {
+      "raw_rgb": [
+        57,
+        73,
+        171
+      ],
+      "raw_hex": "#3949AB",
+      "brightness": 184,
+      "hex": "#2241FF",
+      "hs": [
+        231.6,
+        86.7
+      ],
+      "rgb": [
+        34,
+        65,
+        255
+      ],
+      "brightness_pct": 72
     }
   },
   "playing": true,
   "event": "colors",
   "device": "Amazon AFTKRT",
-  "timestamp": 1794125307
+  "timestamp": 1794140573
 }

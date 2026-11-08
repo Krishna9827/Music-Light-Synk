@@ -102,7 +102,7 @@ object SyncEngine {
         }
     }
 
-    /** Send a fixed red/green/blue/amber palette. [done] runs on the main thread. */
+    /** Send the fixed rainbow test palette (every corner/side differs). [done] runs on the main thread. */
     fun sendTest(ctx: Context, done: ((String) -> Unit)? = null) {
         val app = ctx.applicationContext
         handler.post {

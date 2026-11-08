@@ -120,8 +120,9 @@ The repo is private, so HA can't import it from a link. Copy the file in by hand
    **music_light_synk** → inside it create **music_light_synk.yaml** → paste → **Save**.
 4. **Settings → Automations & scenes → Blueprints** → **Music Light Synk** → **Create automation**.
    If it isn't listed, go to **Developer tools → YAML → Reload automations** and refresh the page.
-5. Leave **Webhook ID** as `music_light_synk`. Pick lights for each corner. If you have only 1–2
-   lights, use **Dominant colour**. For Tuya, open *Brightness and fades* and set **Fade time** to `0`.
+5. Leave **Webhook ID** as `music_light_synk`. Pick lights for each corner / side. If you have only
+   1–2 lights, use **Dominant colour**. For Tuya, open *Brightness and fades* and set **Fade time**
+   to `0`. For WLED effects, see the *Effects* section (README → "WLED and other effect lights").
    **Save**.
 
 ## 8. Test
@@ -130,8 +131,9 @@ The repo is private, so HA can't import it from a link. Copy the file in by hand
 adb shell am broadcast -f 0x20 -n com.musiclightsynk/.AdbCommandReceiver -a com.musiclightsynk.TEST
 ```
 
-You should get `data="Test colours -> HTTP 200"`, and your lights turn red / green / blue / amber
-(top-left / top-right / bottom-left / bottom-right).
+You should get `data="Test colours -> HTTP 200"`, and your lights show a rainbow around the
+"screen": top-left red, top orange, top-right yellow, right green, bottom-right cyan, bottom blue,
+bottom-left indigo, left pink, dominant purple.
 
 Now play a song in Spotify / Amazon Music / Apple Music on the Fire TV. The lights should change
 within a second or two of each new track.
@@ -158,3 +160,10 @@ For a live log, run `adb logcat -s MusicLightSynk` (Ctrl+C to stop).
 - **Change settings:** use the app on the TV (D-pad friendly) or re-run the step 6 command with
   other extras, e.g. `--es source artwork` or `--ei stop_delay 30`. All options are in the README.
 - You can turn ADB Debugging off again afterwards. The app doesn't need it to run.
+
+## Updating to a new version
+
+1. **App:** download the new APK from Actions and run `adb install -r ~/Downloads/music-light-synk.apk`.
+2. **Blueprint:** open File editor → `blueprints/automation/music_light_synk/music_light_synk.yaml`,
+   select all, paste the new version and **Save**. Then **Developer tools → YAML → Reload
+   automations**. Open your automation to set any new options. Existing ones keep their values.

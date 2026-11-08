@@ -87,7 +87,7 @@ class MainActivity : Activity() {
 
         // Left column: status + preview
         left.addView(text("Music Light Synk", 28f, fg, bold = true))
-        left.addView(text("Album art -> 4 corner colours -> Home Assistant lights", 14f, muted))
+        left.addView(text("Album art -> corner + side colours -> Home Assistant lights", 14f, muted))
 
         header(left, "Status")
         accessStatus = text("", 15f, fg).also { left.addView(it) }
@@ -97,7 +97,7 @@ class MainActivity : Activity() {
         nowStatus = text("", 14f, muted).also { left.addView(it) }
         resultStatus = text("", 14f, muted).also { left.addView(it) }
 
-        header(left, "Last colours (as your TV corners)")
+        header(left, "Last colours (laid out like your TV)")
         left.addView(previewGrid())
         left.addView(button("Send test colours") {
             saveFields(silent = true)
@@ -121,7 +121,7 @@ class MainActivity : Activity() {
         right.addView(cycleButton({ "Source: ${prefs.sourceMode.label}" }) {
             prefs.sourceMode = prefs.sourceMode.next()
         })
-        stepper(right, "Corner patch size", "%", 5, Prefs.CORNER_RANGE, { prefs.cornerPct }, { prefs.cornerPct = it })
+        stepper(right, "Edge / corner size", "%", 5, Prefs.CORNER_RANGE, { prefs.cornerPct }, { prefs.cornerPct = it })
         stepper(right, "Saturation boost", "%", 10, Prefs.SATURATION_RANGE, { prefs.saturationPct }, { prefs.saturationPct = it })
         stepper(right, "Minimum brightness", "%", 5, Prefs.MIN_BRIGHTNESS_RANGE, { prefs.minBrightnessPct }, { prefs.minBrightnessPct = it })
         stepper(right, "Re-sample screen every (0 = per track)", "s", 5, Prefs.SCREEN_INTERVAL_RANGE, { prefs.screenIntervalSec }, { prefs.screenIntervalSec = it })
@@ -264,9 +264,11 @@ class MainActivity : Activity() {
                 addView(tv, LinearLayout.LayoutParams(0, dp(height), 1f).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) })
             }
         }
-        box.addView(row(58, Slot.TOP_LEFT, Slot.TOP_RIGHT))
-        box.addView(row(58, Slot.BOTTOM_LEFT, Slot.BOTTOM_RIGHT))
-        box.addView(row(40, Slot.DOMINANT, Slot.VIBRANT, Slot.AVERAGE))
+        // Laid out like the TV: corners and sides around the edge, dominant in the middle.
+        box.addView(row(50, Slot.TOP_LEFT, Slot.TOP, Slot.TOP_RIGHT))
+        box.addView(row(50, Slot.LEFT, Slot.DOMINANT, Slot.RIGHT))
+        box.addView(row(50, Slot.BOTTOM_LEFT, Slot.BOTTOM, Slot.BOTTOM_RIGHT))
+        box.addView(row(36, Slot.VIBRANT, Slot.AVERAGE))
         return box
     }
 
