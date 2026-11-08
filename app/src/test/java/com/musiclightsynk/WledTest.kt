@@ -1,6 +1,5 @@
 package com.musiclightsynk
 
-import com.sun.net.httpserver.HttpServer
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -10,8 +9,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.DatagramPacket
 import java.net.DatagramSocket
-import java.net.InetSocketAddress
+import java.net.ServerSocket
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlin.concurrent.thread
 import kotlin.math.sin
 
 class WledTest {
@@ -129,24 +129,57 @@ class WledTest {
         }
     }
 
+    /**
+     * Tiny fake WLED: GET /json/state returns [state], POST records the body. Plain sockets,
+     * because Android unit tests can't use the JDK's com.sun.net.httpserver.
+     */
+    private class FakeWled(private val state: String) : AutoCloseable {
+        private val server = ServerSocket(0)
+        val posts = CopyOnWriteArrayList<JSONObject>()
+        val host get() = "127.0.0.1:${server.localPort}"
+
+        init {
+            thread(isDaemon = true) {
+                while (!server.isClosed) {
+                    try {
+                        server.accept().use { sock ->
+                            val input = sock.getInputStream().bufferedReader()
+                            val requestLine = input.readLine() ?: return@use
+                            var length = 0
+                            while (true) {
+                                val line = input.readLine() ?: break
+                                if (line.isEmpty()) break
+                                if (line.lowercase().startsWith("content-length:")) length = line.substringAfter(':').trim().toInt()
+                            }
+                            val body = if (requestLine.startsWith("GET")) state else {
+                                val buf = CharArray(length)
+                                var read = 0
+                                while (read < length) read += input.read(buf, read, length - read)
+                                posts += JSONObject(String(buf))
+                                """{"success":true}"""
+                            }
+                            val bytes = body.toByteArray()
+                            val out = sock.getOutputStream()
+                            out.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n".toByteArray())
+                            out.write(bytes)
+                            out.flush()
+                        }
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+        }
+
+        override fun close() = server.close()
+    }
+
     @Test
     fun colorsModeSavesSetsAndRestoresWledState() {
-        val posts = CopyOnWriteArrayList<JSONObject>()
-        val original = JSONObject("""{"on":true,"bri":90,"ps":3,"pl":-1,"seg":[{"id":0,"fx":15,"pal":11,"col":[[1,2,3],[0,0,0],[0,0,0]]}]}""")
-        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        server.createContext("/json/state") { ex ->
-            val body = if (ex.requestMethod == "GET") original.toString() else {
-                posts += JSONObject(ex.requestBody.readBytes().decodeToString())
-                """{"success":true}"""
-            }
-            ex.sendResponseHeaders(200, body.length.toLong())
-            ex.responseBody.use { it.write(body.toByteArray()) }
-        }
-        server.start()
-        try {
-            val host = "127.0.0.1:${server.address.port}"
+        val original = """{"on":true,"bri":90,"ps":3,"pl":-1,"seg":[{"id":0,"fx":15,"pal":11,"col":[[1,2,3],[0,0,0],[0,0,0]]}]}"""
+        FakeWled(original).use { wled ->
+            val posts = wled.posts
             val cfg = WledConfig(
-                hosts = listOf(host), mode = WledMode.COLORS, layout = null,
+                hosts = listOf(wled.host), mode = WledMode.COLORS, layout = null,
                 colorSlots = listOf(Slot.DOMINANT, Slot.VIBRANT, Slot.AVERAGE), fx = -1, palette = 5,
                 brightness = 1f, restore = true, pulse = false, pulseStrength = 0f,
             )
@@ -166,8 +199,7 @@ class WledTest {
             assertEquals(15, restore.getJSONArray("seg").getJSONObject(0).getInt("fx"))
             assertEquals(90, restore.getInt("bri"))
             assertFalse("preset pointer must not be re-applied", restore.has("ps"))
-        } finally {
-            server.stop(0)
+            assertEquals(3, posts.size)
         }
     }
 
