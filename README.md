@@ -419,3 +419,7 @@ The app already sends at most one update per track. The rest of the lag is Tuya'
 - Per-app WLED mode (e.g. ambient for music, off for movies).
 - Submit to the HACS default list (needs a brand icon in home-assistant/brands, repo topics and a
   description).
+
+## License
+
+[MIT](LICENSE)
