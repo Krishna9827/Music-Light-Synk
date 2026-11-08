@@ -1,0 +1,156 @@
+{
+  "app": "Spotify",
+  "reason": "track",
+  "package": "com.spotify.tv.android",
+  "artist": "The Weeknd",
+  "album": "After Hours",
+  "source": "artwork",
+  "title": "Blinding Lights",
+  "session_start": true,
+  "colors": {
+    "top_right": {
+      "raw_rgb": [
+        67,
+        160,
+        71
+      ],
+      "raw_hex": "#43A047",
+      "brightness": 174,
+      "hex": "#3EFF47",
+      "hs": [
+        122.6,
+        75.6
+      ],
+      "rgb": [
+        62,
+        255,
+        71
+      ],
+      "brightness_pct": 68
+    },
+    "average": {
+      "raw_rgb": [
+        145,
+        133,
+        88
+      ],
+      "raw_hex": "#918558",
+      "brightness": 162,
+      "hex": "#FFE47D",
+      "hs": [
+        47.4,
+        51.1
+      ],
+      "rgb": [
+        255,
+        228,
+        125
+      ],
+      "brightness_pct": 64
+    },
+    "vibrant": {
+      "raw_rgb": [
+        255,
+        179,
+        0
+      ],
+      "raw_hex": "#FFB300",
+      "brightness": 255,
+      "hex": "#FFB300",
+      "hs": [
+        42.1,
+        100
+      ],
+      "rgb": [
+        255,
+        179,
+        0
+      ],
+      "brightness_pct": 100
+    },
+    "dominant": {
+      "raw_rgb": [
+        229,
+        57,
+        53
+      ],
+      "raw_hex": "#E53935",
+      "brightness": 233,
+      "hex": "#FF0600",
+      "hs": [
+        1.4,
+        99.9
+      ],
+      "rgb": [
+        255,
+        6,
+        0
+      ],
+      "brightness_pct": 91
+    },
+    "top_left": {
+      "raw_rgb": [
+        229,
+        57,
+        53
+      ],
+      "raw_hex": "#E53935",
+      "brightness": 233,
+      "hex": "#FF0600",
+      "hs": [
+        1.4,
+        99.9
+      ],
+      "rgb": [
+        255,
+        6,
+        0
+      ],
+      "brightness_pct": 91
+    },
+    "bottom_right": {
+      "raw_rgb": [
+        255,
+        179,
+        0
+      ],
+      "raw_hex": "#FFB300",
+      "brightness": 255,
+      "hex": "#FFB300",
+      "hs": [
+        42.1,
+        100
+      ],
+      "rgb": [
+        255,
+        179,
+        0
+      ],
+      "brightness_pct": 100
+    },
+    "bottom_left": {
+      "raw_rgb": [
+        30,
+        136,
+        229
+      ],
+      "raw_hex": "#1E88E5",
+      "brightness": 233,
+      "hex": "#0088FF",
+      "hs": [
+        208,
+        100
+      ],
+      "rgb": [
+        0,
+        136,
+        255
+      ],
+      "brightness_pct": 91
+    }
+  },
+  "playing": true,
+  "event": "colors",
+  "device": "Amazon AFTKRT",
+  "timestamp": 1794125307
+}

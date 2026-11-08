@@ -13,7 +13,7 @@ blueprint:
     groups, but then the last update wins.
   domain: automation
   author: Music Light Synk
-  source_url: https://github.com/krishna9827/music-light-synk/blob/main/home-assistant/blueprints/automation/music_light_synk.yaml
+  source_url: https://github.com/Krishna9827/Music-Light-Synk/blob/main/home-assistant/blueprints/automation/music_light_synk.yaml
   homeassistant:
     min_version: 2024.10.0
   input:

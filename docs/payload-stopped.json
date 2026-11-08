@@ -1,0 +1,11 @@
+{
+  "app": "Spotify",
+  "package": "com.spotify.tv.android",
+  "artist": "The Weeknd",
+  "album": "After Hours",
+  "playing": false,
+  "event": "stopped",
+  "title": "Blinding Lights",
+  "device": "Amazon AFTKRT",
+  "timestamp": 1794125307
+}

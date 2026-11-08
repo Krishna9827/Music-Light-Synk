@@ -177,7 +177,7 @@ class ScreenCaptureService : Service() {
         frame = null
         frameTime = 0L
         armed = true
-        handler.post { vd.surface = rd.surface }
+        handler.post { setSurfaceSafely(vd, rd) }
 
         var result: IntArray? = null
         while (SystemClock.uptimeMillis() - start < timeoutMs) {
@@ -190,8 +190,18 @@ class ScreenCaptureService : Service() {
         }
         if (result == null) result = frame
         armed = false
-        handler.post { vd.surface = null }
+        handler.post { setSurfaceSafely(vd, null) }
         return result?.let { Frame(it, width, height) }
+    }
+
+    /** The service may be tearing down concurrently; a released display must not crash us. */
+    private fun setSurfaceSafely(vd: VirtualDisplay, rd: ImageReader?) {
+        if (virtualDisplay !== vd) return
+        try {
+            vd.surface = rd?.surface
+        } catch (e: Exception) {
+            Log.w(TAG, "setSurface failed", e)
+        }
     }
 
     private fun onImage(r: ImageReader) {
