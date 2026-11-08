@@ -6,8 +6,8 @@ A small TV app reads the album art of whatever is playing (Spotify, Amazon Music
 YouTube, ...), extracts **4 corner + 4 side colours** (plus dominant / vibrant / average), and sends
 them **once per track change** to any mix of:
 
-- **Home Assistant** (webhook + blueprint, or MQTT + blueprint), which maps the colours to your lights,
-- the **Music Light Synk integration**, which gives you a colour sensor per zone for dashboards,
+- **Home Assistant**, through the **Music Light Synk integration** (install from HACS, pick your
+  lights in the UI, done) or a blueprint if you prefer automations,
 - **WLED directly** over your LAN (instant, skips Home Assistant), as album colours or an ambient
   gradient around the TV that can **pulse to the beat**.
 
@@ -64,17 +64,27 @@ commands, with no script or git clone needed.
    .\scripts\setup-firetv.ps1 -TvIp 192.168.1.50 -Apk .\music-light-synk.apk -HaUrl http://192.168.1.10:8123
    ```
    Accept the *"Allow USB debugging?"* prompt on the TV the first time.
-4. **Import the blueprint into Home Assistant.**
-   [![Import blueprint](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2FKrishna9827%2FMusic-Light-Synk%2Fblob%2Fmain%2Fhome-assistant%2Fblueprints%2Fautomation%2Fmusic_light_synk.yaml)
-   The button only works if the repo is **public** and the file is on `main`. Otherwise (e.g. a
-   private repo) copy `home-assistant/blueprints/automation/music_light_synk.yaml` to
-   `/config/blueprints/automation/music_light_synk/` (the File editor add-on is easiest) and
-   reload automations.
-   Then go to *Settings > Automations > Create automation > Music Light Synk*, keep the webhook
-   ID `music_light_synk` (or change it in both places), and pick which lights get which corner / side.
+4. **Home Assistant: install the integration with HACS.**
+
+   [![Open in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Krishna9827&repository=Music-Light-Synk&category=integration)
+
+   Click the button, or go to *HACS → ⋮ → Custom repositories* and add
+   `https://github.com/Krishna9827/Music-Light-Synk` as type **Integration**. Then **Download**
+   and **restart Home Assistant**. Then:
+
+   [![Add integration](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=music_light_synk)
+
+   Name it (e.g. *Living room TV*), keep the webhook ID `music_light_synk` (what the app sends to
+   out of the box), and **pick which lights follow which part of the artwork**. Done. No YAML, no
+   blueprint. Press the device's **Test lights** button to check the mapping.
 5. Play a song on the TV.
 
 If you only have one or two lights, put them under **Dominant colour**.
+
+**Prefer an automation?** The blueprint does the same light mapping:
+[![Import blueprint](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2FKrishna9827%2FMusic-Light-Synk%2Fblob%2Fmain%2Fhome-assistant%2Fblueprints%2Fautomation%2Fmusic_light_synk.yaml)
+Use the integration **or** the blueprint on a given webhook ID, not both. Home Assistant allows
+only one listener per webhook ID, and the integration refuses an ID the blueprint already uses.
 Using MQTT instead of webhooks? Use `music_light_synk_mqtt.yaml` (see [MQTT](#mqtt)).
 
 ```
@@ -90,9 +100,9 @@ Using MQTT instead of webhooks? Use `music_light_synk_mqtt.yaml` (see [MQTT](#mq
 
 ### WLED and other effect lights
 
-By default the blueprint **switches any running effect to a solid colour**. Otherwise WLED keeps
+By default the integration (and the blueprint) **switches any running effect to a solid colour**. Otherwise WLED keeps
 running e.g. "Running" and only changes its colour. In the blueprint's **Effects** section you
-can choose instead:
+can choose instead (integration: *Configure → Effects*; blueprint: *Effects* section):
 
 - **Run an effect in the artwork colours**: pick one (Running, Breathe, Fade, Scan, Twinkle,
   Meteor, ...) or type any name your light lists. Lights without that effect get a solid colour.
@@ -184,27 +194,34 @@ adb shell am broadcast -n com.musiclightsynk/.AdbCommandReceiver -a com.musiclig
   --ez pulse true --ei pulse_strength 60
 ```
 
-### Home Assistant integration (colour entities)
+### Home Assistant integration
 
-`custom_components/music_light_synk` gives you a device per TV with:
+Installed via HACS (step 4 above). Each TV is one device with:
 
-- 11 sensors such as `sensor.living_room_tv_top_left_colour`. The state is the hex colour; the
-  attributes are `rgb`, `hs`, `brightness`, `raw_hex` and more. They survive restarts.
-- `sensor.<tv>_now_playing` (title, or `idle`, plus app/artist/album attributes) and
-  `binary_sensor.<tv>_playing`.
-- a `music_light_synk_event` on the event bus for every payload, handy as an automation trigger.
+| Entity | What |
+|---|---|
+| `switch.<tv>_light_sync` | Turn the light control on/off, e.g. from a "movie night" scene. Turning it off gives the lights back |
+| `button.<tv>_test_lights` | Rainbow test pattern on your mapped lights for 6 s, then restores them |
+| `sensor.<tv>_top_left_colour` … (11) | State = hex colour; attributes `hs`, `rgb`, `brightness`, `raw_hex`, … |
+| `sensor.<tv>_now_playing` | Title or `idle`, with app/artist/album attributes |
+| `binary_sensor.<tv>_playing` | On while music plays |
 
-Install: copy the `custom_components/music_light_synk` folder into your HA `config/custom_components/`
-(Samba share or File editor), restart HA, then **Settings → Devices & services → Add integration →
-Music Light Synk**. It uses its **own** webhook ID (default `music_light_synk_entities`; it
-refuses the blueprint's), so add it to the app's webhook field, comma separated:
+Plus a `music_light_synk_event` on the event bus for every payload, handy as an automation trigger.
 
-```bash
-adb shell am broadcast -n com.musiclightsynk/.AdbCommandReceiver -a com.musiclightsynk.CONFIGURE \
-  --es webhook_id music_light_synk,music_light_synk_entities
-```
+**Configure** (on the integration card) has four sections: **Lights** per zone, **Brightness and
+fades** (follow the artwork or fixed, max brightness, fade time), **Effects** (solid / run an
+effect / leave alone, plus WLED palettes), and **When the music stops** (restore / off / nothing).
+Changes apply from the next track. No restart is needed.
 
-(Using MQTT with discovery? Then you already have the same entities and don't need this.)
+Two TVs? Add the integration twice with different webhook IDs, and give each app its own ID.
+
+**Coming from the blueprint?** Delete that automation (it holds the `music_light_synk` webhook),
+then add the integration with the same ID. The app needs no change. Or keep the blueprint and give
+the integration another ID, e.g. `music_light_synk_entities`, and set the app to
+`music_light_synk,music_light_synk_entities`.
+
+Without HACS: copy `custom_components/music_light_synk` into your HA `config/custom_components/`
+and restart.
 
 ## Settings (on the TV app or over ADB)
 
@@ -334,7 +351,7 @@ The app already sends at most one update per track. The rest of the lag is Tuya'
 | `MQTT broker refused connection: bad username or password` | Check `mqtt_user` / `mqtt_pass` (the app doesn't retry a refused login) |
 | WLED ambient does nothing | Check the layout is valid (`STATUS` shows it) and *Receive UDP realtime* is on in WLED |
 | "Beat pulse hears silence" | The device or app blocks audio analysis, or HDMI passthrough is on. Use PCM/stereo output to test |
-| Integration says the webhook ID is in use | You gave it the blueprint's ID. Use a different one, e.g. `music_light_synk_entities` |
+| Integration says the webhook ID is in use | The blueprint automation holds it. Delete that automation first, or use another ID (e.g. `music_light_synk_entities`) and add it to the app |
 
 ## How it's built
 
@@ -368,6 +385,16 @@ The app already sends at most one update per track. The rest of the lag is Tuya'
   after stop), the JSON save → set → restore flow against a fake WLED, and beat detection.
 - CI (`.github/workflows/build.yml`) builds the signed APK, checks both blueprints, checks the
   MQTT blueprint is regenerated (`scripts/build_blueprints.py --check`) and byte-compiles the integration.
+  `validate.yml` runs Home Assistant's **hassfest** and the **HACS** validator.
+- The integration's light control was run in a real Home Assistant 2026.2 with demo lights:
+  - the setup wizard (name, webhook, lights per zone) and the sectioned *Configure* screen work,
+    and clearing a zone really clears it;
+  - every zone gets its colour and brightness, and a running effect is switched to solid;
+  - "run an effect" (case-insensitive name) also sets the palette;
+  - a repeated `session_start` doesn't overwrite the snapshot, and stop restores colours, effect
+    and palette;
+  - *Light sync* off gives the lights back and ignores new colours;
+  - *Test lights* shows the pattern and restores after 6 s.
 - End to end against **real** Mosquitto 2.0 + Home Assistant 2026.2:
   - The app's MQTT code logged in with a password and published. HA discovery created all 13
     entities, the MQTT blueprint set the lights, and "stopped" turned them off.
@@ -390,4 +417,5 @@ The app already sends at most one update per track. The rest of the lag is Tuya'
 
 - Hue Entertainment API output (fast, like WLED UDP, for Hue lights).
 - Per-app WLED mode (e.g. ambient for music, off for movies).
-- HACS install once the repo is public (the folder layout already fits).
+- Submit to the HACS default list (needs a brand icon in home-assistant/brands, repo topics and a
+  description).

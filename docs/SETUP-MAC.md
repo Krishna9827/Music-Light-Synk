@@ -106,24 +106,34 @@ It replies `data="Saved: ha_url=http://192.168.1.10:8123, webhook_id=music_light
 adb shell am start -n com.musiclightsynk/.CaptureConsentActivity
 ```
 
-## 7. Add the blueprint to Home Assistant
+## 7. Home Assistant: install the integration (HACS)
 
-The repo is private, so HA can't import it from a link. Copy the file in by hand:
+Everything on the HA side happens in the UI. No files, no YAML.
 
-1. On the Mac, open the blueprint on GitHub:
-   `home-assistant/blueprints/automation/music_light_synk.yaml` (on branch
-   `claude/funny-franklin-hjlmbn`, or `main` once merged) → click the **copy raw file** button.
-2. In HA: **Settings → Add-ons → Add-on Store → File editor** → **Install** → **Start** → turn on
-   **Show in sidebar**. If you run HA in Docker without add-ons, put the file in your config folder
-   at the path below instead.
-3. Open **File editor** (sidebar) → folder icon → go to `blueprints/automation/` → create a folder
-   **music_light_synk** → inside it create **music_light_synk.yaml** → paste → **Save**.
-4. **Settings → Automations & scenes → Blueprints** → **Music Light Synk** → **Create automation**.
-   If it isn't listed, go to **Developer tools → YAML → Reload automations** and refresh the page.
-5. Leave **Webhook ID** as `music_light_synk`. Pick lights for each corner / side. If you have only
-   1–2 lights, use **Dominant colour**. For Tuya, open *Brightness and fades* and set **Fade time**
-   to `0`. For WLED effects, see the *Effects* section (README → "WLED and other effect lights").
-   **Save**.
+1. **HACS → ⋮ (top right) → Custom repositories**. Repository:
+   `https://github.com/Krishna9827/Music-Light-Synk`, type **Integration** → **Add**.
+   (No HACS yet? Install it first: https://hacs.xyz/docs/use/download/download/)
+2. Search HACS for **Music Light Synk** → **Download** → **restart Home Assistant**
+   (*Settings → System → ⋮ → Restart*).
+3. **Settings → Devices & services → Add integration → Music Light Synk**.
+4. Name it (e.g. *Living room TV*) and keep webhook ID **`music_light_synk`**. That's what the
+   app already sends to, so nothing changes on the TV.
+5. **Pick your lights** for each zone of the artwork (corners, edges, dominant, vibrant). Leave
+   the rest empty. With only 1–2 lights, use **Dominant colour**. **Submit**.
+6. Optional: on the integration card, **Configure** → *Brightness and fades* (Tuya: set **Fade
+   time** to `0`), *Effects* (WLED), *When the music stops*.
+7. On the new device, press **Test lights**. Your lights show the rainbow test pattern for 6 seconds.
+
+> **Already using the blueprint?** Delete that automation first (*Settings → Automations →
+> Music Light Synk → ⋮ → Delete*). It holds the `music_light_synk` webhook, and HA allows only one
+> listener per webhook ID. The integration does the same job.
+
+<details><summary>Rather use the blueprint instead of the integration?</summary>
+
+**Settings → Automations & scenes → Blueprints → Import blueprint** and paste
+`https://github.com/Krishna9827/Music-Light-Synk/blob/main/home-assistant/blueprints/automation/music_light_synk.yaml`.
+Then **Create automation**, keep webhook ID `music_light_synk`, pick lights, **Save**.
+</details>
 
 ## 8. Test
 
@@ -148,7 +158,7 @@ adb shell am broadcast -f 0x20 -n com.musiclightsynk/.AdbCommandReceiver -a com.
 | Status says | Meaning / fix |
 |---|---|
 | `media_access=NOT GRANTED` | Run the `allow_listener` command from step 5 again |
-| `last=... HTTP 200` but lights don't change | HA got it. Check the automation's **Traces** in HA, and that the webhook IDs match |
+| `last=... HTTP 200` but lights don't change | HA got it. Check the device's **Light sync** switch is on, the lights are picked under *Configure → Lights*, and the webhook IDs match (blueprint users: check the automation's **Traces**) |
 | `ConnectException` / `timeout` | Wrong HA IP or port in step 6, or HA isn't reachable from the TV |
 | `No colours: X did not provide album art` | That app doesn't share artwork. Run the optional screen-capture command in step 6 |
 
@@ -164,9 +174,8 @@ For a live log, run `adb logcat -s MusicLightSynk` (Ctrl+C to stop).
 ## Updating to a new version
 
 1. **App:** download the new APK from Actions and run `adb install -r ~/Downloads/music-light-synk.apk`.
-2. **Blueprint:** open File editor → `blueprints/automation/music_light_synk/music_light_synk.yaml`,
-   select all, paste the new version and **Save**. Then **Developer tools → YAML → Reload
-   automations**. Open your automation to set any new options. Existing ones keep their values.
+2. **Integration:** HACS shows an update. Click **Update**, then restart HA. Your settings are kept.
+   (Blueprint users: re-import the blueprint, then *Developer tools → YAML → Reload automations*.)
 
 ## Optional extras (all copy-paste)
 
@@ -201,20 +210,16 @@ adb shell am broadcast $R --ez pulse true --ei pulse_strength 60
 ```bash
 adb shell am broadcast $R --ez mqtt_enabled true --es mqtt_host 192.168.1.10 --es mqtt_user YOUR_MQTT_USER --es mqtt_pass YOUR_MQTT_PASSWORD
 ```
-Then add the blueprint `music_light_synk_mqtt.yaml` the same way as step 7 (same folder), and
-remove the webhook automation if you don't want both.
+Then import the MQTT blueprint (*Blueprints → Import blueprint*):
+`https://github.com/Krishna9827/Music-Light-Synk/blob/main/home-assistant/blueprints/automation/music_light_synk_mqtt.yaml`.
+MQTT discovery also creates the colour sensors automatically.
 
-**Colour entities in HA** (custom integration):
-1. In HA, **Settings → Add-ons → Samba share** → install, set a password, start.
-2. On the Mac, Finder → **Go → Connect to Server** → `smb://192.168.1.10` → open **config**.
-3. Create a `custom_components` folder if it's missing, and copy this repo's
-   `custom_components/music_light_synk` folder into it. Restart HA.
-4. **Settings → Devices & services → Add integration → Music Light Synk**. Name it e.g.
-   "Living room TV" and keep webhook ID `music_light_synk_entities`.
-5. Tell the app to send to both the blueprint and the integration:
-   ```bash
-   adb shell am broadcast $R --es webhook_id music_light_synk,music_light_synk_entities
-   ```
+**Keep the blueprint and the integration side by side** (e.g. blueprint for lights, integration
+for dashboards): give the integration webhook ID `music_light_synk_entities` in step 7, then tell
+the app to send to both:
+```bash
+adb shell am broadcast $R --es webhook_id music_light_synk,music_light_synk_entities
+```
 
 Check everything with the `STATUS` command from step 8. It now also lists MQTT, WLED, pulse and
 profiles.
