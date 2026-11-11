@@ -78,4 +78,14 @@ class PayloadsTest {
         dir.mkdirs()
         File(dir, name).writeText(json.toString(2))
     }
+
+    @Test
+    fun statusPayloadCarriesTheAppState() {
+        val st = JSONObject().put("media_access", true).put("screen_capture", false).put("source_mode", "auto")
+        val json = Payloads.status(np, "Amazon AFTKRT", st)
+        assertEquals("status", json.getString("event"))
+        assertTrue(json.getJSONObject("status").getBoolean("media_access"))
+        assertFalse(json.has("colors"))
+        writeSample("status.json", json)
+    }
 }

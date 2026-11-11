@@ -117,6 +117,7 @@ class ScreenCaptureService : Service() {
             setup(code, data)
             instance = this
             Log.i(TAG, "Screen capture ready (${width}x$height)")
+            SyncEngine.reportStatus(this)
         } catch (e: Exception) {
             Log.e(TAG, "Could not start screen capture", e)
             teardown()
@@ -131,6 +132,7 @@ class ScreenCaptureService : Service() {
         teardown()
         thread.quitSafely()
         SyncEngine.notifyUi()
+        SyncEngine.reportStatus(this)
         super.onDestroy()
     }
 

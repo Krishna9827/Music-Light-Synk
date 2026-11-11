@@ -77,6 +77,10 @@ object Payloads {
 
     fun stopped(np: NowPlaying?, device: String): JSONObject = base("stopped", np, device).put("playing", false)
 
+    /** App state for Home Assistant: media access, screen capture, source mode, settings. */
+    fun status(np: NowPlaying?, device: String, status: JSONObject): JSONObject =
+        base("status", np, device).put("status", status)
+
     fun color(c: LightColor): JSONObject = JSONObject()
         .put("hex", c.light.hex)
         .put("rgb", rgb(c.light))

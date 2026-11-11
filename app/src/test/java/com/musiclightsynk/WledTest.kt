@@ -95,7 +95,7 @@ class WledTest {
         DatagramSocket(0).use { rx ->
             rx.soTimeout = 2000
             val ambient = WledAmbient(rx.localPort)
-            ambient.show(listOf("127.0.0.1"), IntArray(10) { 0xFF0000 }, pulse = false, pulseStrength = 0f)
+            ambient.show(mapOf("127.0.0.1" to IntArray(10) { 0xFF0000 }), pulse = false, pulseStrength = 0f)
             val buf = ByteArray(2048)
             var last = ByteArray(0)
             val t0 = System.currentTimeMillis()
@@ -179,8 +179,7 @@ class WledTest {
         FakeWled(original).use { wled ->
             val posts = wled.posts
             val cfg = WledConfig(
-                hosts = listOf(wled.host), mode = WledMode.COLORS, layout = null,
-                colorSlots = listOf(Slot.DOMINANT, Slot.VIBRANT, Slot.AVERAGE), fx = -1, palette = 5,
+                devices = listOf(WledDevice(wled.host, WledZone.Palette(listOf(Slot.DOMINANT, Slot.VIBRANT, Slot.AVERAGE), fx = -1, pal = 5))),
                 brightness = 1f, restore = true, pulse = false, pulseStrength = 0f,
             )
             val c = WledController()
@@ -239,5 +238,99 @@ class WledTest {
         val treble = ByteArray(n).also { it[2 * 200] = 100 } // ~8.6 kHz
         assertEquals(0f, BeatDetector.bassEnergy(treble, sr), 0f)
         assertEquals(0f, BeatDetector.bassEnergy(ByteArray(n), sr), 0f)
+    }
+
+    // ---- multiple devices / zones -------------------------------------------------------------
+
+    @Test
+    fun deviceSpecParsesEveryZoneKind() {
+        val p = WledDevices.parse(
+            "192.168.1.60=ambient:40,22,40,22:bottom_left:cw; 192.168.1.61=top_left ;" +
+                "wled-left.local=left:keep\n192.168.1.63=palette:dominant,vibrant:fx=28:pal=5; http://10.0.0.9/=dominant",
+        )
+        assertTrue(p.errors.toString(), p.errors.isEmpty())
+        assertEquals(5, p.devices.size)
+        val amb = p.devices[0].zone as WledZone.Ambient
+        assertEquals(124, amb.layout.total)
+        assertEquals(Corner.BOTTOM_LEFT, amb.layout.start)
+        assertEquals(WledZone.Section(Slot.TOP_LEFT, false), p.devices[1].zone)
+        assertEquals(WledZone.Section(Slot.LEFT, true), p.devices[2].zone)
+        assertEquals(WledZone.Palette(listOf(Slot.DOMINANT, Slot.VIBRANT), 28, 5), p.devices[3].zone)
+        assertEquals("10.0.0.9", p.devices[4].host)
+    }
+
+    @Test
+    fun deviceSpecRoundTripsAndReportsErrors() {
+        val raw = "192.168.1.60=ambient:40,22,0,22:top_right:ccw; 192.168.1.61=bottom; 192.168.1.62=palette; 192.168.1.63=palette:top,bottom:fx=0"
+        val p = WledDevices.parse(raw)
+        assertEquals(raw, WledDevices.format(p.devices))
+        val bad = WledDevices.parse("no-equals; 1.2.3.4=sideways; 1.2.3.5=ambient:1,2,3; 1.2.3.6=palette:fx=abc; 1.2.3.7=top")
+        assertEquals(4, bad.errors.size)
+        assertEquals(listOf("1.2.3.7"), bad.devices.map { it.host })
+    }
+
+    @Test
+    fun cyclingZonesVisitsEverySectionThenPaletteThenAmbient() {
+        var z: WledZone = WledZone.Section(Slot.TOP_LEFT)
+        val seen = ArrayList<String>()
+        repeat(Slot.values().size + 2) {
+            seen += WledDevices.formatZone(z).substringBefore(':')
+            z = WledDevices.nextZone(z)
+        }
+        assertEquals(Slot.values().map { it.key } + listOf("palette", "ambient"), seen)
+        assertEquals(WledZone.Section(Slot.TOP_LEFT), z) // and wraps round
+    }
+
+    @Test
+    fun sectionBodySetsOneSolidColourOrKeepsTheEffect() {
+        val palette = ColorExtractor.testPalette()
+        val solid = WledController.bodyFor(WledZone.Section(Slot.RIGHT), palette, 1f)
+        val seg = solid.getJSONObject("seg")
+        assertEquals(1, seg.getJSONArray("col").length())
+        assertEquals(0, seg.getInt("fx")) // Solid
+        val rgb = seg.getJSONArray("col").getJSONArray(0)
+        assertEquals(palette[Slot.RIGHT].light, Rgb(rgb.getInt(0), rgb.getInt(1), rgb.getInt(2)))
+        assertEquals(palette[Slot.RIGHT].brightness, solid.getInt("bri"))
+        val keep = WledController.bodyFor(WledZone.Section(Slot.RIGHT, keepEffect = true), palette, 0.5f)
+        assertFalse(keep.getJSONObject("seg").has("fx"))
+        assertEquals(Math.round(palette[Slot.RIGHT].brightness * 0.5f), keep.getInt("bri"))
+    }
+
+    @Test
+    fun severalDevicesEachGetTheirOwnZone() {
+        DatagramSocket(0).use { rx ->
+            FakeWled("""{"on":true,"bri":10,"seg":[{"id":0,"fx":9}]}""").use { left ->
+                FakeWled("""{"on":false,"bri":200,"seg":[{"id":0,"fx":0}]}""").use { right ->
+                    val c = WledController(rx.localPort)
+                    val cfg = WledConfig(
+                        devices = listOf(
+                            WledDevice("127.0.0.1", WledZone.Ambient(WledLayout(4, 2, 4, 2, Corner.BOTTOM_LEFT, true))),
+                            WledDevice(left.host, WledZone.Section(Slot.LEFT)),
+                            WledDevice(right.host, WledZone.Section(Slot.RIGHT)),
+                        ),
+                        brightness = 1f, restore = true, pulse = false, pulseStrength = 0f,
+                    )
+                    val palette = ColorExtractor.testPalette()
+                    val r = c.onColors(cfg, palette, sessionStart = true)
+                    assertTrue(r.message, r.ok)
+                    // ambient strip got a 12-LED UDP frame
+                    rx.soTimeout = 2000
+                    val buf = ByteArray(1024)
+                    val pkt = DatagramPacket(buf, buf.size)
+                    rx.receive(pkt)
+                    assertEquals(4 + 12 * 3, pkt.length)
+                    // each JSON device got its own section colour
+                    fun colourOf(w: FakeWled) = w.posts.last().getJSONObject("seg").getJSONArray("col").getJSONArray(0)
+                        .let { Rgb(it.getInt(0), it.getInt(1), it.getInt(2)) }
+                    assertEquals(palette[Slot.LEFT].light, colourOf(left))
+                    assertEquals(palette[Slot.RIGHT].light, colourOf(right))
+                    // stop restores both JSON devices to their own saved state
+                    c.onStopped(cfg)
+                    assertEquals(9, left.posts.last().getJSONArray("seg").getJSONObject(0).getInt("fx"))
+                    assertEquals(false, right.posts.last().getBoolean("on"))
+                    c.ambient.shutdown()
+                }
+            }
+        }
     }
 }

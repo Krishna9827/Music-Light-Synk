@@ -18,9 +18,12 @@ import kotlin.math.roundToInt
 /*
  * Direct WLED output - no Home Assistant in the loop. Pure JVM code (no Android classes).
  *
- *  COLORS  : JSON API. Sets WLED colours 1/2/3 (e.g. dominant / vibrant / average) so WLED's own
- *            effects run in the album colours. WLED's previous state is saved and put back on stop.
- *  AMBIENT : UDP realtime (DNRGB). Paints a smooth gradient through the 4 corner + 4 side colours
+ * Every device gets its own zone (see [WledZone]):
+ *  Section : one part of the artwork (a corner, a side, dominant, ...) as a solid colour, via the
+ *            JSON API. WLED's previous state is saved and put back on stop.
+ *  Palette : WLED colours 1/2/3 (e.g. dominant / vibrant / average) via the JSON API, so WLED's own
+ *            effects run in the album colours. Also restored on stop.
+ *  Ambient : UDP realtime (DNRGB). Paints a smooth gradient through the 4 corner + 4 side colours
  *            around the TV, fades between tracks, optionally pulses on the beat. When we stop
  *            sending, WLED returns to whatever it was doing by itself after ~2 s.
  */
@@ -224,19 +227,157 @@ class UdpSender {
     }
 }
 
+/** What one WLED device shows. */
+sealed class WledZone {
+    /** One section's colour (a corner, a side, dominant, ...). Solid unless [keepEffect]. */
+    data class Section(val slot: Slot, val keepEffect: Boolean = false) : WledZone()
+
+    /** WLED colours 1/2/3 from three sections; WLED's own effect keeps running. */
+    data class Palette(
+        val slots: List<Slot> = DEFAULT_SLOTS,
+        val fx: Int = -1,
+        val pal: Int = -1,
+    ) : WledZone()
+
+    /** A strip around the TV: gradient through all 8 edge colours over UDP realtime. */
+    data class Ambient(val layout: WledLayout) : WledZone()
+
+    val label: String
+        get() = when (this) {
+            is Section -> slot.label + if (keepEffect) " (keeps effect)" else ""
+            is Palette -> "Effect colours: " + slots.joinToString(", ") { it.label.lowercase() }
+            is Ambient -> "Ambient gradient (${layout.top},${layout.right},${layout.bottom},${layout.left} LEDs)"
+        }
+
+    companion object {
+        val DEFAULT_SLOTS = listOf(Slot.DOMINANT, Slot.VIBRANT, Slot.AVERAGE)
+    }
+}
+
+data class WledDevice(val host: String, val zone: WledZone)
+
 /**
- * Ambient renderer on its own thread. Sends ~30 fps while fading or pulsing, otherwise a
- * keep-alive frame every second (WLED drops out of realtime mode 2 s after the last packet).
+ * WLED device list as one human-editable string (stored in prefs, sent over ADB, shown in HA):
+ *
+ *   192.168.1.60=ambient:40,22,40,22:bottom_left:cw ; 192.168.1.61=top_left ;
+ *   192.168.1.62=left:keep ; 192.168.1.63=palette:dominant,vibrant,average:fx=28:pal=5
+ *
+ * Pure, unit tested.
+ */
+object WledDevices {
+    data class Parsed(val devices: List<WledDevice>, val errors: List<String>)
+
+    fun parse(raw: String): Parsed {
+        val devices = ArrayList<WledDevice>()
+        val errors = ArrayList<String>()
+        for (entry in raw.split(';', '\n').map { it.trim() }.filter { it.isNotEmpty() }) {
+            val eq = entry.indexOf('=')
+            if (eq <= 0) {
+                errors += "'$entry': expected host=zone"
+                continue
+            }
+            val host = entry.substring(0, eq).trim().removePrefix("http://").trimEnd('/')
+            val parts = entry.substring(eq + 1).split(':').map { it.trim() }.filter { it.isNotEmpty() }
+            val zone = parts.firstOrNull()?.lowercase()
+            if (host.isEmpty() || zone == null) {
+                errors += "'$entry': expected host=zone"
+                continue
+            }
+            val opts = parts.drop(1)
+            val parsed: WledZone? = when (zone) {
+                "ambient", "gradient" -> parseAmbient(opts)
+                "palette", "colors", "colours", "effect" -> parsePalette(opts)
+                else -> slotOf(zone)?.let { WledZone.Section(it, opts.any { o -> o.equals("keep", true) }) }
+            }
+            if (parsed == null) errors += "'$entry': unknown zone or bad options" else devices += WledDevice(host, parsed)
+        }
+        return Parsed(devices, errors)
+    }
+
+    fun format(devices: List<WledDevice>): String = devices.joinToString("; ") { "${it.host}=${formatZone(it.zone)}" }
+
+    fun formatZone(zone: WledZone): String = when (zone) {
+        is WledZone.Section -> zone.slot.key + if (zone.keepEffect) ":keep" else ""
+        is WledZone.Palette -> buildString {
+            append("palette")
+            if (zone.slots != WledZone.DEFAULT_SLOTS) append(":").append(zone.slots.joinToString(",") { it.key })
+            if (zone.fx >= 0) append(":fx=").append(zone.fx)
+            if (zone.pal >= 0) append(":pal=").append(zone.pal)
+        }
+        is WledZone.Ambient -> with(zone.layout) {
+            "ambient:$top,$right,$bottom,$left:${start.key}:${if (clockwise) "cw" else "ccw"}"
+        }
+    }
+
+    /** Zones offered when cycling in the TV app: every section, then palette, then ambient. */
+    fun nextZone(zone: WledZone): WledZone {
+        val order: List<WledZone> = Slot.values().map { WledZone.Section(it) } +
+            WledZone.Palette() + WledZone.Ambient(DEFAULT_LAYOUT)
+        val idx = order.indexOfFirst { it::class == zone::class && (it !is WledZone.Section || it.slot == (zone as WledZone.Section).slot) }
+        val next = order[(idx + 1) % order.size]
+        // Keep the user's layout / palette settings when coming back round to them.
+        return when {
+            next is WledZone.Ambient && zone is WledZone.Ambient -> zone
+            else -> next
+        }
+    }
+
+    val DEFAULT_LAYOUT = WledLayout(40, 22, 40, 22, Corner.BOTTOM_LEFT, true)
+
+    private fun slotOf(key: String): Slot? = Slot.values().firstOrNull { it.key.equals(key, ignoreCase = true) }
+
+    private fun parseAmbient(opts: List<String>): WledZone? {
+        var counts: String? = null
+        var start = Corner.BOTTOM_LEFT
+        var cw = true
+        for (o in opts) {
+            when {
+                o.matches(Regex("\\d+(,\\d+){3}")) -> counts = o
+                o.equals("cw", true) || o.equals("clockwise", true) -> cw = true
+                o.equals("ccw", true) || o.equals("counterclockwise", true) -> cw = false
+                Corner.values().any { it.key.equals(o, true) } -> start = Corner.of(o)
+                else -> return null
+            }
+        }
+        val layout = WledLayout.parse(counts ?: return null, start, cw) ?: return null
+        return WledZone.Ambient(layout)
+    }
+
+    private fun parsePalette(opts: List<String>): WledZone? {
+        var slots = WledZone.DEFAULT_SLOTS
+        var fx = -1
+        var pal = -1
+        for (o in opts) {
+            when {
+                o.startsWith("fx=", true) -> fx = o.substring(3).toIntOrNull()?.coerceIn(0, 255) ?: return null
+                o.startsWith("pal=", true) -> pal = o.substring(4).toIntOrNull()?.coerceIn(0, 255) ?: return null
+                else -> {
+                    val list = o.split(',').map { slotOf(it.trim()) ?: return null }
+                    if (list.isEmpty() || list.size > 3) return null
+                    slots = list
+                }
+            }
+        }
+        return WledZone.Palette(slots, fx, pal)
+    }
+}
+
+/**
+ * Ambient renderer on its own thread, for any number of WLED devices (each with its own
+ * frame). Sends ~30 fps while fading or pulsing, otherwise a keep-alive frame every second
+ * (WLED drops out of realtime mode 2 s after the last packet).
  */
 class WledAmbient(private val udpPort: Int = WledPackets.UDP_PORT) {
     private val exec = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "mls-wled").apply { isDaemon = true } }
     private val sender = UdpSender()
 
+    private class Target(var frame: IntArray) {
+        var shown = FloatArray(frame.size * 3)
+        var from = FloatArray(frame.size * 3)
+    }
+
     // all fields below: renderer thread only
-    private var hosts: List<String> = emptyList()
-    private var shown = FloatArray(0)
-    private var from = FloatArray(0)
-    private var target = IntArray(0)
+    private val targets = LinkedHashMap<String, Target>()
     private var fadeStart = 0L
     private var pulse = false
     private var pulseStrength = 0.6f
@@ -253,22 +394,28 @@ class WledAmbient(private val udpPort: Int = WledPackets.UDP_PORT) {
     var framesSent = 0L
         private set
 
-    /** Show a new target frame (fades from what's on the strip now). Safe from any thread. */
-    fun show(hosts: List<String>, frame: IntArray, pulse: Boolean, pulseStrength: Float, durationMs: Long = 0) {
+    /**
+     * Show new frames (host -> one colour per LED), fading from what each strip shows now.
+     * Devices missing from [frames] are released. Safe from any thread.
+     */
+    fun show(frames: Map<String, IntArray>, pulse: Boolean, pulseStrength: Float, durationMs: Long = 0) {
         exec.execute {
             stopTask?.cancel(false)
-            this.hosts = hosts
+            for (host in targets.keys - frames.keys) release(host)
+            for ((host, frame) in frames) {
+                val t = targets[host]
+                if (t == null || t.shown.size != frame.size * 3) {
+                    targets[host] = Target(frame) // new device or new LED count: fade in from black
+                } else {
+                    System.arraycopy(t.shown, 0, t.from, 0, t.shown.size)
+                    t.frame = frame
+                }
+            }
             this.pulse = pulse
             this.pulseStrength = pulseStrength.coerceIn(0f, 1f)
-            if (shown.size != frame.size) {
-                shown = FloatArray(frame.size * 3)
-                from = FloatArray(frame.size * 3)
-            }
-            System.arraycopy(shown, 0, from, 0, shown.size)
-            target = frame
             fadeStart = now()
-            running = true
-            reschedule(0)
+            running = targets.isNotEmpty()
+            if (running) reschedule(0)
             if (durationMs > 0) stopTask = exec.schedule({ stopNow() }, durationMs, TimeUnit.MILLISECONDS)
         }
     }
@@ -294,15 +441,17 @@ class WledAmbient(private val udpPort: Int = WledPackets.UDP_PORT) {
         exec.shutdown()
     }
 
+    private fun release(host: String) {
+        val t = targets.remove(host) ?: return
+        // Last frame with a 1 s timeout so WLED reverts quickly.
+        sender.send(listOf(host), WledPackets.dnrgb(frameOf(t, 1f), 1), udpPort)
+    }
+
     private fun stopNow() {
         task?.cancel(false)
         task = null
-        if (running && target.isNotEmpty()) {
-            // Last frame with a 1 s timeout so WLED reverts quickly.
-            sender.send(hosts, WledPackets.dnrgb(currentFrame(1f), 1), udpPort)
-        }
+        for (host in targets.keys.toList()) release(host)
         running = false
-        shown = FloatArray(0)
         envelope = 0f
     }
 
@@ -319,24 +468,26 @@ class WledAmbient(private val udpPort: Int = WledPackets.UDP_PORT) {
         envelope *= exp(-dt / 160f)
         val fade = ((t - fadeStart) / FADE_MS.toFloat()).coerceIn(0f, 1f)
         val eased = fade * fade * (3 - 2 * fade)
-        for (i in target.indices) {
-            val c = target[i]
-            val tr = ((c shr 16) and 0xFF).toFloat()
-            val tg = ((c shr 8) and 0xFF).toFloat()
-            val tb = (c and 0xFF).toFloat()
-            shown[i * 3] = from[i * 3] + (tr - from[i * 3]) * eased
-            shown[i * 3 + 1] = from[i * 3 + 1] + (tg - from[i * 3 + 1]) * eased
-            shown[i * 3 + 2] = from[i * 3 + 2] + (tb - from[i * 3 + 2]) * eased
-        }
         val factor = if (pulse) (1f - pulseStrength) + pulseStrength * envelope else 1f
-        if (sender.send(hosts, WledPackets.dnrgb(currentFrame(factor), 2), udpPort)) framesSent++
+        for ((host, target) in targets) {
+            val frame = target.frame
+            for (i in frame.indices) {
+                val c = frame[i]
+                for (ch in 0..2) {
+                    val v = ((c shr (16 - ch * 8)) and 0xFF).toFloat()
+                    val k = i * 3 + ch
+                    target.shown[k] = target.from[k] + (v - target.from[k]) * eased
+                }
+            }
+            if (sender.send(listOf(host), WledPackets.dnrgb(frameOf(target, factor), 2), udpPort)) framesSent++
+        }
         reschedule(if (fade < 1f || pulse) FRAME_MS else KEEPALIVE_MS)
     }
 
-    private fun currentFrame(factor: Float): IntArray = IntArray(target.size) { i ->
-        val r = (shown[i * 3] * factor).roundToInt().coerceIn(0, 255)
-        val g = (shown[i * 3 + 1] * factor).roundToInt().coerceIn(0, 255)
-        val b = (shown[i * 3 + 2] * factor).roundToInt().coerceIn(0, 255)
+    private fun frameOf(t: Target, factor: Float): IntArray = IntArray(t.frame.size) { i ->
+        val r = (t.shown[i * 3] * factor).roundToInt().coerceIn(0, 255)
+        val g = (t.shown[i * 3 + 1] * factor).roundToInt().coerceIn(0, 255)
+        val b = (t.shown[i * 3 + 2] * factor).roundToInt().coerceIn(0, 255)
         (r shl 16) or (g shl 8) or b
     }
 
@@ -350,19 +501,16 @@ class WledAmbient(private val udpPort: Int = WledPackets.UDP_PORT) {
 }
 
 data class WledConfig(
-    val hosts: List<String>,
-    val mode: WledMode,
-    val layout: WledLayout?,
-    val colorSlots: List<Slot>,
-    val fx: Int,
-    val palette: Int,
+    val devices: List<WledDevice>,
     val brightness: Float,
     val restore: Boolean,
     val pulse: Boolean,
     val pulseStrength: Float,
-)
+) {
+    val hasAmbient: Boolean get() = devices.any { it.zone is WledZone.Ambient }
+}
 
-/** Decides what to send to WLED for each engine event. Call from one thread. */
+/** Decides what to send to each WLED device for each engine event. Call from one thread. */
 class WledController(udpPort: Int = WledPackets.UDP_PORT) {
     data class Result(val ok: Boolean, val message: String)
 
@@ -371,45 +519,45 @@ class WledController(udpPort: Int = WledPackets.UDP_PORT) {
     private val restoreExec = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "mls-wled-restore").apply { isDaemon = true } }
 
     fun onColors(cfg: WledConfig, palette: Palette, sessionStart: Boolean, preview: Boolean = false): Result {
-        if (cfg.mode != WledMode.AMBIENT) ambient.stop()
-        return when (cfg.mode) {
-            WledMode.OFF -> Result(false, "WLED off")
-            WledMode.AMBIENT -> {
-                val layout = cfg.layout ?: return Result(false, "WLED: set the LED layout (top,right,bottom,left)")
-                val frame = layout.render { slot -> scaled(palette[slot], cfg.brightness) }
-                ambient.show(cfg.hosts, frame, cfg.pulse && !preview, cfg.pulseStrength, if (preview) PREVIEW_MS else 0)
-                Result(true, "WLED ambient ${layout.total} LEDs")
-            }
-            WledMode.COLORS -> {
-                if (cfg.restore && (sessionStart || preview)) {
-                    synchronized(this) {
-                        for (h in cfg.hosts) if (h !in saved) WledJson.getState(h)?.let { saved[h] = it }
-                    }
-                }
-                val cols = cfg.colorSlots.map { palette[it].light }
-                val bri = (palette[cfg.colorSlots.firstOrNull() ?: Slot.DOMINANT].brightness * cfg.brightness).roundToInt()
-                val body = WledJson.colorsBody(cols, bri, cfg.fx, cfg.palette)
-                val results = cfg.hosts.map { WledJson.post(it, body) }
-                if (preview) restoreExec.schedule({ restoreAll(cfg) }, PREVIEW_MS, TimeUnit.MILLISECONDS)
-                Result(results.any { it.ok }, "WLED " + results.joinToString(", ") { it.message })
+        val frames = LinkedHashMap<String, IntArray>()
+        val json = cfg.devices.filter { it.zone !is WledZone.Ambient }
+        for (d in cfg.devices) {
+            val z = d.zone as? WledZone.Ambient ?: continue
+            frames[d.host] = z.layout.render { slot -> scaled(palette[slot], cfg.brightness) }
+        }
+        ambient.show(frames, cfg.pulse && !preview, cfg.pulseStrength, if (preview) PREVIEW_MS else 0)
+
+        if (json.isNotEmpty() && cfg.restore && (sessionStart || preview)) {
+            synchronized(this) {
+                for (d in json) if (d.host !in saved) WledJson.getState(d.host)?.let { saved[d.host] = it }
             }
         }
+        val parts = ArrayList<String>()
+        var ok = frames.isNotEmpty()
+        if (frames.isNotEmpty()) parts += "ambient x${frames.size}"
+        for (d in json) {
+            val r = WledJson.post(d.host, bodyFor(d.zone, palette, cfg.brightness))
+            if (r.ok) ok = true
+            parts += "${d.host} ${r.message}"
+        }
+        if (preview && json.isNotEmpty()) restoreExec.schedule({ restoreAll() }, PREVIEW_MS, TimeUnit.MILLISECONDS)
+        return Result(ok, "WLED " + parts.joinToString(", ").ifEmpty { "no devices" })
     }
 
     fun onStopped(cfg: WledConfig): Result {
         ambient.stop()
-        if (cfg.restore) return restoreAll(cfg) // no-op unless colours mode saved a state
+        if (cfg.restore) return restoreAll() // no-op unless a JSON device saved a state
         return Result(true, "WLED released")
     }
 
-    /** Settings changed to "off" or hosts removed: let go of everything. */
-    fun release(cfg: WledConfig?) {
+    /** WLED switched off or devices removed: let go of everything. */
+    fun release(restore: Boolean) {
         ambient.stop()
-        if (cfg != null && cfg.restore) restoreAll(cfg)
+        if (restore) restoreAll()
     }
 
     @Synchronized
-    private fun restoreAll(cfg: WledConfig): Result {
+    private fun restoreAll(): Result {
         if (saved.isEmpty()) return Result(true, "WLED nothing to restore")
         val msgs = ArrayList<String>()
         for ((host, state) in saved) {
@@ -432,6 +580,18 @@ class WledController(udpPort: Int = WledPackets.UDP_PORT) {
 
     companion object {
         const val PREVIEW_MS = 6000L
+
+        fun bodyFor(zone: WledZone, palette: Palette, master: Float): JSONObject = when (zone) {
+            is WledZone.Section -> {
+                val c = palette[zone.slot]
+                WledJson.colorsBody(listOf(c.light), (c.brightness * master).roundToInt(), if (zone.keepEffect) -1 else 0, -1)
+            }
+            is WledZone.Palette -> {
+                val bri = (palette[zone.slots.first()].brightness * master).roundToInt()
+                WledJson.colorsBody(zone.slots.map { palette[it].light }, bri, zone.fx, zone.pal)
+            }
+            is WledZone.Ambient -> throw IllegalArgumentException("ambient zones go over UDP")
+        }
     }
 }
 

@@ -242,6 +242,7 @@ data class MqttConfig(
     val colorsTopic get() = "$prefix/colors"
     val stateTopic get() = "$prefix/state"
     val availabilityTopic get() = "$prefix/availability"
+    val statusTopic get() = "$prefix/status"
 }
 
 /**
@@ -332,6 +333,7 @@ class MqttBridge(private val clientIdSuffix: String = "") {
         val text = payload.toString()
         c.publish(cfg.eventTopic, text, retain = false)
         if (payload.has("colors")) c.publish(cfg.colorsTopic, text, retain = true)
+        payload.optJSONObject("status")?.let { c.publish(cfg.statusTopic, it.toString(), retain = true) }
         c.publish(cfg.stateTopic, stateOf(payload).toString(), retain = true)
     }
 
@@ -373,6 +375,22 @@ class MqttBridge(private val clientIdSuffix: String = "") {
                 .put("value_template", "{{ (value_json.title or 'unknown') if value_json.playing else 'idle' }}")
                 .put("json_attributes_topic", cfg.stateTopic)
                 .put("icon", "mdi:music")
+            out += "homeassistant/sensor/$node/source_mode/config" to base("Source mode", "source_mode")
+                .put("state_topic", cfg.statusTopic)
+                .put("value_template", "{{ value_json.source_mode }}")
+                .put("icon", "mdi:image-filter-center-focus")
+            out += "homeassistant/sensor/$node/colour_source/config" to base("Colour source", "colour_source")
+                .put("state_topic", cfg.statusTopic)
+                .put("value_template", "{{ value_json.last_source or 'none' }}")
+                .put("icon", "mdi:palette-swatch")
+            out += "homeassistant/binary_sensor/$node/media_access/config" to base("Media access", "media_access")
+                .put("state_topic", cfg.statusTopic)
+                .put("value_template", "{{ 'ON' if value_json.media_access else 'OFF' }}")
+                .put("icon", "mdi:music-box-multiple")
+            out += "homeassistant/binary_sensor/$node/screen_capture/config" to base("Screen capture", "screen_capture")
+                .put("state_topic", cfg.statusTopic)
+                .put("value_template", "{{ 'ON' if value_json.screen_capture else 'OFF' }}")
+                .put("device_class", "running")
             out += "homeassistant/binary_sensor/$node/playing/config" to base("Playing", "playing")
                 .put("state_topic", cfg.stateTopic)
                 .put("value_template", "{{ 'ON' if value_json.playing else 'OFF' }}")

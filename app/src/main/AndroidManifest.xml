@@ -89,6 +89,7 @@
                 <action android:name="com.musiclightsynk.TEST" />
                 <action android:name="com.musiclightsynk.STATUS" />
                 <action android:name="com.musiclightsynk.CAPTURE" />
+                <action android:name="com.musiclightsynk.STOP_CAPTURE" />
             </intent-filter>
         </receiver>
     </application>

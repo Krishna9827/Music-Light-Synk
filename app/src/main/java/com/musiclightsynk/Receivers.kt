@@ -38,12 +38,24 @@ class AdbCommandReceiver : BroadcastReceiver() {
         const val ACTION_TEST = "com.musiclightsynk.TEST"
         const val ACTION_STATUS = "com.musiclightsynk.STATUS"
         const val ACTION_CAPTURE = "com.musiclightsynk.CAPTURE"
+        const val ACTION_STOP_CAPTURE = "com.musiclightsynk.STOP_CAPTURE"
+
+        private val LEGACY_WLED_KEYS = listOf(
+            "wled_mode", "wled_hosts", "wled_layout", "wled_start", "wled_clockwise", "wled_colors", "wled_fx", "wled_pal",
+        )
     }
 
     override fun onReceive(context: Context, intent: Intent) {
         when (intent.action) {
             ACTION_CONFIGURE -> resultData = configure(context, intent)
-            ACTION_STATUS -> resultData = status(context)
+            ACTION_STATUS -> {
+                resultData = status(context)
+                SyncEngine.reportStatus(context, force = true) // also push it to Home Assistant / MQTT
+            }
+            ACTION_STOP_CAPTURE -> {
+                ScreenCaptureService.stop(context)
+                resultData = "Stopped screen capture"
+            }
             ACTION_TEST -> {
                 val pending = goAsync()
                 SyncEngine.sendTest(context) { msg ->
@@ -86,17 +98,22 @@ class AdbCommandReceiver : BroadcastReceiver() {
         Opt("mqtt_topic", 's') { p, v -> p.mqttTopic = v as String; p.mqttTopic },
         Opt("mqtt_discovery", 'b') { p, v -> p.mqttDiscovery = v as Boolean; "${p.mqttDiscovery}" },
         Opt("mqtt_tls", 'b') { p, v -> p.mqttTls = v as Boolean; "${p.mqttTls}" },
-        Opt("wled_mode", 's') { p, v -> p.wledMode = WledMode.of(v as String); p.wledMode.key },
-        Opt("wled_hosts", 's') { p, v -> p.wledHostsRaw = v as String; p.wledHosts.joinToString(",").ifEmpty { "(none)" } },
-        Opt("wled_layout", 's') { p, v ->
-            p.wledLayoutRaw = v as String
-            if (WledLayout.parse(p.wledLayoutRaw, p.wledStart, p.wledClockwise) == null) "INVALID (use top,right,bottom,left)" else p.wledLayoutRaw
+        Opt("wled_enabled", 'b') { p, v -> p.wledEnabled = v as Boolean; "${p.wledEnabled}" },
+        Opt("wled_devices", 's') { p, v ->
+            val parsed = WledDevices.parse(v as String)
+            p.wledDevicesRaw = v
+            p.wledDevicesRaw.ifEmpty { "(none)" } +
+                if (parsed.errors.isEmpty()) "" else " | IGNORED: " + parsed.errors.joinToString(", ")
         },
-        Opt("wled_start", 's') { p, v -> p.wledStart = Corner.of(v as String); p.wledStart.key },
-        Opt("wled_clockwise", 'b') { p, v -> p.wledClockwise = v as Boolean; "${p.wledClockwise}" },
-        Opt("wled_colors", 's') { p, v -> p.wledColorsRaw = v as String; p.wledConfig().colorSlots.joinToString(",") { it.key } },
-        Opt("wled_fx", 'i') { p, v -> p.wledFx = v as Int; "${p.wledFx}" },
-        Opt("wled_pal", 'i') { p, v -> p.wledPalette = v as Int; "${p.wledPalette}" },
+        // v0.3 single-WLED keys, still accepted: they rebuild the device list (see LEGACY_WLED_KEYS).
+        Opt("wled_mode", 's') { p, v -> p.legacyWledMode = WledMode.of(v as String); p.legacyWledMode.key },
+        Opt("wled_hosts", 's') { p, v -> p.legacyWledHosts = v as String; p.legacyWledHosts },
+        Opt("wled_layout", 's') { p, v -> p.legacyWledLayout = v as String; p.legacyWledLayout },
+        Opt("wled_start", 's') { p, v -> p.legacyWledStart = Corner.of(v as String); p.legacyWledStart.key },
+        Opt("wled_clockwise", 'b') { p, v -> p.legacyWledClockwise = v as Boolean; "${p.legacyWledClockwise}" },
+        Opt("wled_colors", 's') { p, v -> p.legacyWledColors = v as String; p.legacyWledColors },
+        Opt("wled_fx", 'i') { p, v -> p.legacyWledFx = v as Int; "${p.legacyWledFx}" },
+        Opt("wled_pal", 'i') { p, v -> p.legacyWledPalette = v as Int; "${p.legacyWledPalette}" },
         Opt("wled_brightness_pct", 'i') { p, v -> p.wledBrightnessPct = v as Int; "${p.wledBrightnessPct}" },
         Opt("wled_restore", 'b') { p, v -> p.wledRestore = v as Boolean; "${p.wledRestore}" },
         Opt("pulse", 'b') { p, v -> p.pulseEnabled = v as Boolean; "${p.pulseEnabled}" },
@@ -118,6 +135,10 @@ class AdbCommandReceiver : BroadcastReceiver() {
         }
         if (changed.isEmpty() && bad.isEmpty()) {
             return "Nothing changed. Options: " + options.joinToString(" ") { it.key }
+        }
+        if (LEGACY_WLED_KEYS.any { i.hasExtra(it) } && !i.hasExtra("wled_devices")) {
+            p.applyLegacyWled()
+            changed += "wled_devices=${p.wledDevicesRaw.ifEmpty { "(none)" }}"
         }
         SyncEngine.settingsChanged(ctx)
         SyncEngine.notifyUi()
@@ -143,7 +164,7 @@ class AdbCommandReceiver : BroadcastReceiver() {
             "source=" + p.sourceMode.key,
             "profiles=" + p.profilesRaw.ifEmpty { "(none)" },
             "mqtt=" + if (p.isMqttConfigured) "${p.mqttHost}:${p.mqttPort} ${p.mqttTopic}" else "off",
-            "wled=" + if (p.isWledConfigured) "${p.wledMode.key} ${p.wledHosts.joinToString(",")}" else "off",
+            "wled=" + if (p.isWledConfigured) p.wledDevicesRaw else "off",
             "pulse=" + p.pulseEnabled,
             "enabled=" + p.enabled,
             "now=" + s.nowPlaying,

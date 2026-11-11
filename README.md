@@ -8,8 +8,9 @@ them **once per track change** to any mix of:
 
 - **Home Assistant**, through the **Music Light Synk integration** (install from HACS, pick your
   lights in the UI, done) or a blueprint if you prefer automations,
-- **WLED directly** over your LAN (instant, skips Home Assistant), as album colours or an ambient
-  gradient around the TV that can **pulse to the beat**.
+- **WLED directly** over your LAN (instant, skips Home Assistant): as many WLEDs as you like,
+  each showing its own part of the artwork (a corner, a side, dominant, ...), WLED's own effects in
+  album colours, or an ambient gradient around the TV that can **pulse to the beat**.
 
 No Raspberry Pi, no HDMI grabber, and no continuous colour stream, so slow cloud bulbs like Tuya
 keep up.
@@ -48,9 +49,8 @@ on the same Wi-Fi as the TV, just for the one-time setup.
 **On a Mac? Follow [docs/SETUP-MAC.md](docs/SETUP-MAC.md).** It's every step as copy-paste
 commands, with no script or git clone needed.
 
-1. **Get the APK.** Open the repo's **Actions** tab, then the latest *Build APK* run, then the
-   artifact `music-light-synk-apk`. Unzip it to get `music-light-synk.apk`. If you push a tag
-   like `v0.1.0`, the APK is also attached to a GitHub Release.
+1. **Get the APK** from the [latest release](https://github.com/Krishna9827/Music-Light-Synk/releases/latest)
+   (`music-light-synk.apk`). Every release also has the integration zip and both blueprints.
 2. **Enable ADB on the Fire TV.** Go to *Settings > My Fire TV > About* and click the device name
    7× to unlock Developer options. Then *Developer options > ADB debugging = ON*. Note the IP
    address (*About > Network*).
@@ -157,29 +157,32 @@ adb shell am broadcast -n com.musiclightsynk/.AdbCommandReceiver -a com.musiclig
 
 ### WLED direct (skips Home Assistant)
 
-Talks to WLED straight over your Wi-Fi, so it's instant. Two modes:
+Talks to WLED straight over your Wi-Fi, so it's instant. Add **as many WLED devices as you like**
+and give each one a zone. On the TV: *WLED devices → Add*, then press the zone button to cycle.
+From Home Assistant: the *WLED devices* text entity. Over ADB: `wled_devices`.
 
-- **Colours** (`wled_mode colors`): sets WLED colours 1/2/3 (default: dominant, vibrant, average)
-  through the JSON API, so **WLED's own effects run in the album colours**. Optionally also pick
-  the effect (`wled_fx`, WLED effect ID) and palette (`wled_pal`, e.g. `5` = "Colors Only").
-  WLED's previous state is saved and restored when the music stops.
-- **Ambient gradient** (`wled_mode ambient`): for a strip around the TV. Paints a smooth gradient
-  through the 4 corner + 4 side colours and fades between tracks (UDP realtime / DNRGB). When the
-  music stops, the app stops sending and WLED goes back to its own effect by itself about a second
-  later.
-  Tell it how the strip runs: LED counts `top,right,bottom,left` (0 for a side without LEDs),
-  where LED 0 is, and the direction (as seen from the front):
+| Zone | What the WLED shows | How |
+|---|---|---|
+| `top_left`, `top`, `top_right`, `left`, `right`, `bottom_left`, `bottom`, `bottom_right`, `dominant`, `vibrant`, `average` | That part of the artwork as one solid colour. Add `:keep` to keep WLED's current effect and only change its colour | JSON API |
+| `palette` | Colours 1/2/3 = dominant / vibrant / average, so **WLED's own effects run in the album colours**. Options: `:dominant,vibrant,top` (pick the 3), `:fx=28` (effect ID), `:pal=5` (palette ID) | JSON API |
+| `ambient` | A strip around the TV: smooth gradient through all 8 edge colours, fading between tracks, optional beat pulse. Options: LED counts `top,right,bottom,left` (0 = no LEDs on that side), where LED 0 is, `cw`/`ccw` as seen from the front | UDP realtime (DNRGB) |
+
+Format: `host=zone[:options]`, separated by `;`. Example: a strip around the TV, a lamp on the left,
+a lamp on the right, and a shelf running its own effect in album colours:
 
 ```bash
 adb shell am broadcast -n com.musiclightsynk/.AdbCommandReceiver -a com.musiclightsynk.CONFIGURE \
-  --es wled_mode ambient --es wled_hosts 192.168.1.60 --es wled_layout 40,22,40,22 \
-  --es wled_start bottom_left --ez wled_clockwise true
+  --es wled_devices '192.168.1.60=ambient:40,22,40,22:bottom_left:cw; 192.168.1.61=left; 192.168.1.62=right; 192.168.1.63=palette:fx=28'
 ```
 
-In WLED, *Config → Sync Interfaces → Realtime → "Receive UDP realtime"* must be on (it is by
-default). If the strip is also in the blueprint, remove it there so the two don't fight.
+JSON devices are put back the way they were when the music stops. Ambient strips go back to
+their own effect by themselves about a second after the app stops sending. In WLED,
+*Config → Sync Interfaces → Realtime → "Receive UDP realtime"* must be on for ambient strips (it
+is by default). If a WLED is also in the blueprint or the integration's light zones, remove it
+there so the two don't fight. (The v0.3 settings `wled_mode` / `wled_hosts` / `wled_layout` still
+work over ADB and are converted to a device list.)
 
-**Beat pulse** (ambient mode only): the gradient pulses on the kick drum. It uses Android's
+**Beat pulse** (ambient strips only): the gradient pulses on the kick drum. It uses Android's
 `Visualizer` on the TV's audio output, so the app needs audio permission: turn it on in the app
 and accept the prompt, or run `adb shell pm grant com.musiclightsynk android.permission.RECORD_AUDIO`.
 It runs at ~30 fps over UDP, which is why it's WLED-only: Home Assistant and cloud bulbs can't
@@ -202,15 +205,36 @@ Installed via HACS (step 4 above). Each TV is one device with:
 |---|---|
 | `switch.<tv>_light_sync` | Turn the light control on/off, e.g. from a "movie night" scene. Turning it off gives the lights back |
 | `button.<tv>_test_lights` | Rainbow test pattern on your mapped lights for 6 s, then restores them |
+| `sensor.<tv>_colour_source` | Where the colours come from right now: **Album art (media access)** or **Screen capture** |
+| `binary_sensor.<tv>_media_access` / `_screen_capture` | Whether the app has media access / is capturing the screen |
 | `sensor.<tv>_top_left_colour` … (11) | State = hex colour; attributes `hs`, `rgb`, `brightness`, `raw_hex`, … |
 | `sensor.<tv>_now_playing` | Title or `idle`, with app/artist/album attributes |
 | `binary_sensor.<tv>_playing` | On while music plays |
 
+**Control the TV app from Home Assistant.** HA's
+[Android Debug Bridge](https://www.home-assistant.io/integrations/androidtv/) integration can run
+commands on the Fire TV. Pick that Fire TV entity in the setup wizard's last step (or later under
+*Configure → TV app control*) and the device gets:
+
+| Entity | What |
+|---|---|
+| `select.<tv>_colour_source_mode` | **Auto** (album art, screen if none) / **Album art (media access)** / **Screen capture** |
+| `switch.<tv>_screen_capture` | Start / stop screen capture |
+| `switch.<tv>_tv_syncing`, `_beat_pulse` | Pause the whole app; beat pulse for ambient WLED strips |
+| Configuration: switches | WLED output, restore WLED on stop, restart capture after reboot, MQTT output |
+| Configuration: numbers | Edge / corner size, saturation boost, minimum brightness, screen re-sample interval, stop delay, WLED brightness, pulse strength |
+| Configuration: text | **WLED devices** (see [WLED direct](#wled-direct-skips-home-assistant)), **Per-app profiles** |
+| Configuration: buttons | **Grant TV permissions** (media access + screen capture without a prompt), **Refresh TV app status**, **Send test colours from TV** |
+
+The values always come from the app itself: it reports its state to HA whenever something
+changes. So changes made on the TV, over ADB or from HA all show up in the same place.
+
 Plus a `music_light_synk_event` on the event bus for every payload, handy as an automation trigger.
 
-**Configure** (on the integration card) has four sections: **Lights** per zone, **Brightness and
+**Configure** (on the integration card) has five sections: **Lights** per zone, **Brightness and
 fades** (follow the artwork or fixed, max brightness, fade time), **Effects** (solid / run an
-effect / leave alone, plus WLED palettes), and **When the music stops** (restore / off / nothing).
+effect / leave alone, plus WLED palettes), **When the music stops** (restore / off / nothing) and
+**TV app control** (the Android Debug Bridge entity).
 Changes apply from the next track. No restart is needed.
 
 Two TVs? Add the integration twice with different webhook IDs, and give each app its own ID.
@@ -247,14 +271,11 @@ The settings screen works with the remote's D-pad. Every setting can also be set
 | MQTT broker | `mqtt_host`, `mqtt_port`, `mqtt_user`, `mqtt_pass`, `mqtt_tls` | –, 1883 | |
 | MQTT topic prefix | `mqtt_topic` | `music_light_synk` | One per TV |
 | MQTT discovery | `mqtt_discovery` | on | Creates HA entities automatically |
-| WLED mode | `wled_mode` | `off` | `off` / `colors` / `ambient` |
-| WLED devices | `wled_hosts` | – | IPs, comma separated |
-| WLED strip layout | `wled_layout`, `wled_start`, `wled_clockwise` | –, `bottom_left`, true | Ambient mode. Counts `top,right,bottom,left` |
-| WLED colours 1/2/3 | `wled_colors` | `dominant,vibrant,average` | Colours mode. Any slot names |
-| WLED effect / palette | `wled_fx`, `wled_pal` | -1 (keep) | Colours mode. WLED IDs |
+| WLED output on/off | `wled_enabled` | on | Master switch for direct WLED |
+| WLED devices | `wled_devices` | none | `host=zone[:options]; ...`, see [WLED direct](#wled-direct-skips-home-assistant) |
 | WLED brightness | `wled_brightness_pct` | 100 | Scales everything sent to WLED |
-| Restore WLED on stop | `wled_restore` | on | Colours mode |
-| Beat pulse | `pulse`, `pulse_strength` | off, 60 % | Ambient mode, needs audio permission |
+| Restore WLED on stop | `wled_restore` | on | JSON (section / palette) devices |
+| Beat pulse | `pulse`, `pulse_strength` | off, 60 % | Ambient strips, needs audio permission |
 
 ### ADB cheat sheet
 
@@ -267,6 +288,7 @@ adb shell am broadcast $R -a com.musiclightsynk.CONFIGURE --es ha_url http://192
 adb shell am broadcast $R -a com.musiclightsynk.TEST      # rainbow test colours around the "screen"
 adb shell am broadcast $R -a com.musiclightsynk.STATUS    # access granted? last result? now playing?
 adb shell am start -n com.musiclightsynk/.CaptureConsentActivity   # (re)start screen capture
+adb shell am broadcast $R -a com.musiclightsynk.STOP_CAPTURE         # stop screen capture
 
 # permissions the setup script grants
 adb shell cmd notification allow_listener com.musiclightsynk/com.musiclightsynk.MediaListenerService
@@ -288,7 +310,7 @@ your token.
 
 ```jsonc
 {
-  "event": "colors",            // "colors" | "stopped" | "test"
+  "event": "colors",            // "colors" | "stopped" | "test" | "status" (app state only, no colours)
   "reason": "track",            // "track" | "update" (art arrived late) | "screen_poll" | "test"
   "session_start": true,        // first colours after a stop -> blueprint snapshots your lights
   "source": "artwork",          // "artwork" | "screen"
@@ -309,6 +331,12 @@ your token.
   }
 }
 ```
+
+Every payload also carries a `status` object with the app's state: `media_access`,
+`screen_capture`, `source_mode`, `last_source`, `app_version` and `settings` (no secrets). The
+app also sends it alone as `"event": "status"` whenever it changes; see
+[`docs/payload-status.json`](docs/payload-status.json). Blueprints and automations that check
+`event` simply ignore it.
 
 Example of a hand-written automation:
 
@@ -409,6 +437,11 @@ The app already sends at most one update per track. The rest of the lag is Tuya'
   running effect gets switched to solid, "run an effect" sets it (case-insensitive) plus the
   palette select, and "restore" brings back the old effect and palette. A repeated
   `session_start` doesn't overwrite the "before" snapshot.
+- TV app control from HA was tested with a stand-in for the Android Debug Bridge integration
+  that runs the exact shell commands through POSIX shell parsing and answers like the app. Each
+  control sent the right command; values with `;`, `=` and spaces arrived intact; and the
+  app's status reply updated every entity. Without an ADB entity the controls are unavailable,
+  not broken.
 - Not covered by these tests: anything that needs the physical TV or a real WLED. That includes
   whether the Fire TV `Visualizer` returns real audio, and the UDP/JSON packets on actual WLED
   firmware (they follow the documented protocols).

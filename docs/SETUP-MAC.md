@@ -60,10 +60,8 @@ You should see `192.168.1.50:5555   device`.
 
 ## 4. Download the APK
 
-1. In a browser where you're logged in to GitHub, open the repo → **Actions** tab → click the
-   latest **Build APK** run (green tick).
-2. Scroll to **Artifacts** → click **music-light-synk-apk**. A zip downloads.
-3. Double-click the zip in Downloads. You get **music-light-synk.apk**.
+Open https://github.com/Krishna9827/Music-Light-Synk/releases/latest and click
+**music-light-synk.apk** under *Assets*. It lands in your Downloads folder.
 
 ## 5. Install the app and grant permissions
 
@@ -173,7 +171,7 @@ For a live log, run `adb logcat -s MusicLightSynk` (Ctrl+C to stop).
 
 ## Updating to a new version
 
-1. **App:** download the new APK from Actions and run `adb install -r ~/Downloads/music-light-synk.apk`.
+1. **App:** download the new APK from [Releases](https://github.com/Krishna9827/Music-Light-Synk/releases/latest) and run `adb install -r ~/Downloads/music-light-synk.apk`.
 2. **Integration:** HACS shows an update. Click **Update**, then restart HA. Your settings are kept.
    (Blueprint users: re-import the blueprint, then *Developer tools → YAML → Reload automations*.)
 
@@ -191,14 +189,15 @@ adb shell am broadcast $R --es profiles "com.google.android.youtube.tv=screen;co
 ```
 Or play something and press **"This app uses: ..."** on the TV to cycle through them.
 
-**WLED straight from the TV** (instant, no HA). Use your WLED's IP:
+**WLED straight from the TV** (instant, no HA). Add as many as you like, each showing its own part
+of the artwork. Easiest on the TV: *WLED devices → Add → press the zone button*. Or in one go:
 ```bash
-# album colours, WLED keeps its own effect
-adb shell am broadcast $R --es wled_mode colors --es wled_hosts 192.168.1.60
-# or: ambient gradient around the TV. LED counts top,right,bottom,left + where LED 0 is
-adb shell am broadcast $R --es wled_mode ambient --es wled_hosts 192.168.1.60 --es wled_layout 40,22,40,22 --es wled_start bottom_left --ez wled_clockwise true
+# strip around the TV + a lamp on each side + a shelf running its own effect in album colours
+adb shell am broadcast $R --es wled_devices '192.168.1.60=ambient:40,22,40,22:bottom_left:cw; 192.168.1.61=left; 192.168.1.62=right; 192.168.1.63=palette'
 ```
-If the same WLED is also in the blueprint, remove it there.
+Zones: any corner or side, `dominant`, `vibrant`, `average`, `palette` (WLED effects in album
+colours) or `ambient` (gradient strip: LED counts top,right,bottom,left, where LED 0 is, cw/ccw).
+If a WLED is also one of your Home Assistant light zones, remove it there.
 
 **Beat pulse** (ambient mode only):
 ```bash
@@ -221,5 +220,11 @@ the app to send to both:
 adb shell am broadcast $R --es webhook_id music_light_synk,music_light_synk_entities
 ```
 
-Check everything with the `STATUS` command from step 8. It now also lists MQTT, WLED, pulse and
-profiles.
+**Control the TV app from Home Assistant instead** (no more ADB from the Mac): if you have the
+[Android Debug Bridge](https://www.home-assistant.io/integrations/androidtv/) integration, open the
+Music Light Synk integration → **Configure → TV app control** → pick your Fire TV. The device then
+gets a **Colour source mode** selector (album art / screen capture), a **Screen capture** switch,
+and every other setting as switches, numbers and text fields.
+
+Check everything with the `STATUS` command from step 8. It lists MQTT, WLED, pulse and
+profiles too.

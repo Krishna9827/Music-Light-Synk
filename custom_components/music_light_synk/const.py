@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 DOMAIN = "music_light_synk"
@@ -86,3 +87,53 @@ TEST_COLORS: dict[str, dict[str, Any]] = {
 def signal_update(entry_id: str) -> str:
     """Dispatcher signal for one config entry."""
     return f"{DOMAIN}_{entry_id}_update"
+
+
+# ---- TV app control through Home Assistant's Android Debug Bridge integration ---------------
+
+CONF_ADB_ENTITY = "adb_entity"
+
+APP_PACKAGE = "com.musiclightsynk"
+APP_RECEIVER = f"{APP_PACKAGE}/.AdbCommandReceiver"
+APP_LISTENER = f"{APP_PACKAGE}/{APP_PACKAGE}.MediaListenerService"
+
+SOURCE_MODES = ["auto", "artwork", "screen"]
+
+
+@dataclass(frozen=True)
+class AppSetting:
+    """One TV app setting: its key in the app (= ADB extra = status.settings key)."""
+
+    key: str
+    name: str
+    icon: str
+    min: float = 0
+    max: float = 100
+    step: float = 1
+    unit: str | None = None
+    config: bool = True  # shown under the device's "Configuration" section
+
+
+APP_SWITCHES: list[AppSetting] = [
+    AppSetting("enabled", "TV syncing", "mdi:sync", config=False),
+    AppSetting("pulse", "Beat pulse", "mdi:pulse", config=False),
+    AppSetting("wled_enabled", "WLED output", "mdi:led-strip-variant"),
+    AppSetting("wled_restore", "Restore WLED when music stops", "mdi:restore"),
+    AppSetting("boot_capture", "Restart screen capture after reboot", "mdi:restart"),
+    AppSetting("mqtt_enabled", "MQTT output", "mdi:lan-connect"),
+]
+
+APP_NUMBERS: list[AppSetting] = [
+    AppSetting("corner_pct", "Edge / corner size", "mdi:border-outside", 10, 50, 5, "%"),
+    AppSetting("saturation_pct", "Saturation boost", "mdi:palette", 50, 250, 10, "%"),
+    AppSetting("min_brightness_pct", "Minimum brightness", "mdi:brightness-4", 1, 60, 1, "%"),
+    AppSetting("screen_interval", "Re-sample screen every", "mdi:timer-refresh-outline", 0, 120, 5, "s"),
+    AppSetting("stop_delay", "Send 'stopped' after a pause of", "mdi:timer-pause-outline", 0, 300, 5, "s"),
+    AppSetting("wled_brightness_pct", "WLED brightness", "mdi:brightness-6", 10, 100, 5, "%"),
+    AppSetting("pulse_strength", "Pulse strength", "mdi:waveform", 10, 100, 5, "%"),
+]
+
+APP_TEXTS: list[AppSetting] = [
+    AppSetting("wled_devices", "WLED devices", "mdi:led-strip"),
+    AppSetting("profiles", "Per-app profiles", "mdi:application-cog"),
+]

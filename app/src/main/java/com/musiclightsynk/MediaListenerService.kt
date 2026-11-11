@@ -115,6 +115,7 @@ class MediaListenerService : NotificationListenerService() {
         }
         Log.i(TAG, "Listener connected")
         SyncEngine.notifyUi()
+        SyncEngine.reportStatus(this)
     }
 
     override fun onListenerDisconnected() {
@@ -122,6 +123,7 @@ class MediaListenerService : NotificationListenerService() {
         connected = false
         teardown()
         SyncEngine.notifyUi()
+        SyncEngine.reportStatus(this)
         requestRebindIfNeeded(this)
     }
 
