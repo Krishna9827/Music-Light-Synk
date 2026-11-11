@@ -3,7 +3,6 @@ name: Build APK
 on:
   push:
     branches: ["**"]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -36,13 +35,6 @@ jobs:
           path: music-light-synk.apk
           if-no-files-found: error
 
-      - name: Attach APK to GitHub release (tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: music-light-synk.apk
-          generate_release_notes: true
-
   home-assistant:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -60,3 +52,59 @@ jobs:
         run: |
           python -m compileall -q custom_components/music_light_synk
           for f in custom_components/music_light_synk/*.json custom_components/music_light_synk/translations/*.json hacs.json; do python -m json.tool "$f" > /dev/null; done
+      - name: App and integration have the same version
+        run: |
+          APP=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' app/build.gradle.kts)
+          HA=$(python -c 'import json; print(json.load(open("custom_components/music_light_synk/manifest.json"))["version"])')
+          echo "app $APP / integration $HA"
+          test "$APP" = "$HA"
+          grep -q "^## v$APP" CHANGELOG.md || { echo "CHANGELOG.md has no '## v$APP' section"; exit 1; }
+
+  # On main: publish a GitHub Release (APK, integration zip, blueprints) whenever the version
+  # is new. Bump versionName + manifest version + CHANGELOG to cut the next release.
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [apk, home-assistant]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Is this version already released?
+        id: v
+        run: |
+          VERSION=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' app/build.gradle.kts)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" > /dev/null; then
+            echo "v$VERSION already released - nothing to do"
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/download-artifact@v4
+        if: steps.v.outputs.new == 'true'
+        with:
+          name: music-light-synk-apk
+
+      - name: Release notes and integration zip
+        if: steps.v.outputs.new == 'true'
+        run: |
+          python3 scripts/release_notes.py "${{ steps.v.outputs.version }}" > release-notes.md
+          (cd custom_components && zip -qr ../music_light_synk.zip music_light_synk)
+          cp home-assistant/blueprints/automation/music_light_synk.yaml music_light_synk_blueprint.yaml
+          cp home-assistant/blueprints/automation/music_light_synk_mqtt.yaml music_light_synk_mqtt_blueprint.yaml
+
+      - uses: softprops/action-gh-release@v2
+        if: steps.v.outputs.new == 'true'
+        with:
+          tag_name: v${{ steps.v.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: Music Light Synk v${{ steps.v.outputs.version }}
+          body_path: release-notes.md
+          make_latest: true
+          files: |
+            music-light-synk.apk
+            music_light_synk.zip
+            music_light_synk_blueprint.yaml
+            music_light_synk_mqtt_blueprint.yaml

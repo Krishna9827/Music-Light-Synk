@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -25,6 +25,7 @@ async def async_setup_entry(
     """Create one sensor per colour slot plus a now-playing sensor."""
     entities: list[SensorEntity] = [ColorSensor(entry, key, name) for key, name in SLOTS]
     entities.append(NowPlayingSensor(entry))
+    entities.append(ColourSourceSensor(entry))
     async_add_entities(entities)
 
 
@@ -90,5 +91,38 @@ class NowPlayingSensor(MusicLightSynkEntity, SensorEntity, RestoreEntity):
         self._attr_native_value = value
         self._attr_extra_state_attributes = {
             k: payload[k] for k in TRACK_ATTRS if payload.get(k) is not None
+        }
+        return True
+
+
+class ColourSourceSensor(MusicLightSynkEntity, SensorEntity, RestoreEntity):
+    """Where the colours come from right now: album art (media access) or screen capture."""
+
+    _attr_icon = "mdi:palette-swatch"
+    _attr_name = "Colour source"
+    _attr_translation_key = "colour_source"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["artwork", "screen", "test", "none"]
+
+    def __init__(self, entry: MusicLightSynkConfigEntry) -> None:
+        super().__init__(entry, "colour_source")
+        self._attr_native_value: str | None = None
+        self._attr_extra_state_attributes: dict[str, Any] = {}
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        if not self._update_from_data() and (last := await self.async_get_last_state()):
+            if last.state in self._attr_options:
+                self._attr_native_value = last.state
+
+    def _update_from_data(self) -> bool:
+        data = self._entry.runtime_data
+        source = data.source or data.status.get("last_source")
+        if source is None and not data.status:
+            return False
+        self._attr_native_value = source if source in self._attr_options else "none"
+        st = data.status
+        self._attr_extra_state_attributes = {
+            k: st[k] for k in ("source_mode", "media_access", "screen_capture", "app_version") if k in st
         }
         return True

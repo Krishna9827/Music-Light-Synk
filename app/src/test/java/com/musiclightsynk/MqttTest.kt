@@ -183,7 +183,10 @@ class MqttTest {
     @Test
     fun discoveryTemplatesPointAtTheRightSlot() {
         val msgs = MqttBridge.discoveryMessages(cfg(1883))
-        assertEquals(Slot.values().size + 2, msgs.size)
+        // 11 colour slots + now playing + playing + source mode + colour source + media access + screen capture
+        assertEquals(Slot.values().size + 6, msgs.size)
+        val capture = msgs.first { it.first.endsWith("/screen_capture/config") }.second
+        assertEquals("music_light_synk/living/status", capture.getString("state_topic"))
         val top = msgs.first { it.first.endsWith("/top/config") }.second
         assertEquals("{{ value_json.colors.top.hex }}", top.getString("value_template"))
         assertEquals("music_light_synk/living/colors", top.getString("state_topic"))

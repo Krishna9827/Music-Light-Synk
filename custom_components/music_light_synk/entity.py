@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from homeassistant.core import callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
@@ -44,3 +46,21 @@ class MusicLightSynkEntity(Entity):
     def _update_from_data(self) -> bool:
         """Pull new values from runtime data. Return True if anything changed."""
         raise NotImplementedError
+
+
+class TvAppEntity(MusicLightSynkEntity):
+    """A TV app setting/command sent through ADB; its state comes from the app's status reports."""
+
+    @property
+    def available(self) -> bool:
+        return self._entry.runtime_data.app.available
+
+    def _update_from_data(self) -> bool:
+        return True
+
+    async def _send(self, **values: Any) -> None:
+        data = self._entry.runtime_data
+        await data.app.configure(**values)
+        for key, value in values.items():
+            data.set_setting(key, value)
+        self.async_write_ha_state()

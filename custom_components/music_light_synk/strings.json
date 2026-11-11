@@ -31,6 +31,13 @@
           "dominant_lights": "Best choice if you only have one or two lights.",
           "vibrant_lights": "The most colourful part of the artwork."
         }
+      },
+      "tv": {
+        "title": "Control the TV app from Home Assistant (optional)",
+        "description": "Pick your Fire TV / Android TV entity from Home Assistant's Android Debug Bridge integration. Then the device gets controls for the colour source (album art or screen capture), screen capture, WLED, and every other TV app setting. Skip this if you don't use the Android Debug Bridge integration.",
+        "data": {
+          "adb_entity": "Fire TV (Android Debug Bridge)"
+        }
       }
     },
     "error": {
@@ -101,6 +108,13 @@
             "data_description": {
               "on_stop": "The TV app reports 'stopped' after playback has been paused for the delay set in the app (15 s by default)."
             }
+          },
+          "tv": {
+            "name": "TV app control",
+            "description": "The Fire TV / Android TV entity from the Android Debug Bridge integration. Used to change the TV app's settings from Home Assistant.",
+            "data": {
+              "adb_entity": "Fire TV (Android Debug Bridge)"
+            }
           }
         }
       }
@@ -125,6 +139,27 @@
         "restore": "Restore the lights to how they were before the music",
         "off": "Turn the lights off",
         "nothing": "Leave them as they are"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "colour_source": {
+        "state": {
+          "artwork": "Album art (media access)",
+          "screen": "Screen capture",
+          "test": "Test pattern",
+          "none": "Nothing yet"
+        }
+      }
+    },
+    "select": {
+      "source_mode": {
+        "state": {
+          "auto": "Auto: album art, screen if no art",
+          "artwork": "Album art (media access)",
+          "screen": "Screen capture"
+        }
       }
     }
   }

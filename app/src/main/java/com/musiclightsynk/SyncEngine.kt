@@ -64,6 +64,7 @@ object SyncEngine {
     private val mqtt = MqttBridge()
     private val wled = WledController()
     private var lastWledCfg: WledConfig? = null
+    private var lastStatusJson: String? = null
 
     /** Main thread only. */
     private val pulse = AudioPulse(
@@ -103,6 +104,18 @@ object SyncEngine {
         }
     }
 
+    /**
+     * Tell Home Assistant / MQTT what the app is doing (media access, screen capture, source
+     * mode, settings). Sent only when something changed, unless [force].
+     */
+    fun reportStatus(ctx: Context, force: Boolean = false) {
+        val app = ctx.applicationContext
+        handler.post {
+            appCtx = app
+            sendStatus(app, Prefs(app), force)
+        }
+    }
+
     /** Settings changed: re-evaluate what's playing so the user sees the effect right away. */
     fun settingsChanged(ctx: Context) {
         val app = ctx.applicationContext
@@ -112,6 +125,7 @@ object SyncEngine {
             artCacheKey = null
             if (!prefs.isMqttConfigured) mqtt.close()
             if (!prefs.isWledConfigured) releaseWled()
+            sendStatus(app, prefs, force = false)
             if (!prefs.enabled) {
                 handler.removeCallbacks(pollTask)
                 updatePulse(prefs, false)
@@ -132,7 +146,7 @@ object SyncEngine {
         handler.post {
             val prefs = Prefs(app)
             val palette = ColorExtractor.testPalette(prefs.extractOptions())
-            val json = Payloads.colors("test", "test", false, "test", current, palette, device)
+            val json = withStatus(app, prefs, Payloads.colors("test", "test", false, "test", current, palette, device))
             // Idle: WLED shows the test for a few seconds, then goes back to what it was doing.
             // During music: show the test, then put the music colours back.
             val r = deliver(prefs, json, palette, sessionStart = false, preview = !sessionActive)
@@ -219,7 +233,7 @@ object SyncEngine {
             setStatus(status.copy(palette = palette, source = source))
             return
         }
-        val json = Payloads.colors("colors", reason, sessionStart, source, np, palette, device)
+        val json = withStatus(ctxOrNull(), prefs, Payloads.colors("colors", reason, sessionStart, source, np, palette, device))
         val r = deliver(prefs, json, palette, sessionStart, preview = false)
         if (r.ok) {
             lastSent = palette
@@ -272,7 +286,8 @@ object SyncEngine {
         stopScheduled = false
         val ctx = appCtx ?: return
         if (!sessionActive) return
-        val r = deliver(Prefs(ctx), Payloads.stopped(current, device), null, sessionStart = false, preview = false)
+        val prefs = Prefs(ctx)
+        val r = deliver(prefs, withStatus(ctx, prefs, Payloads.stopped(current, device)), null, sessionStart = false, preview = false)
         sessionActive = false
         lastSent = null
         currentKey = null
@@ -284,7 +299,7 @@ object SyncEngine {
     private fun updatePulse(prefs: Prefs, playing: Boolean) {
         val ctx = appCtx ?: return
         val want = playing && prefs.enabled && prefs.pulseEnabled &&
-            prefs.isWledConfigured && prefs.wledMode == WledMode.AMBIENT
+            prefs.isWledConfigured && prefs.wledConfig().hasAmbient
         wled.ambient.setPulse(want, prefs.pulseStrengthPct / 100f)
         main.post {
             if (want && !pulse.isRunning) pulse.start(ctx) else if (!want && pulse.isRunning) pulse.stop()
@@ -292,8 +307,66 @@ object SyncEngine {
     }
 
     private fun releaseWled() {
-        lastWledCfg?.let { wled.release(it) }
+        lastWledCfg?.let { wled.release(it.restore) }
         lastWledCfg = null
+    }
+
+    private fun ctxOrNull(): Context? = appCtx
+
+    private fun appVersion(ctx: Context): String = try {
+        @Suppress("DEPRECATION")
+        ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "?"
+    } catch (e: Exception) {
+        "?"
+    }
+
+    /** Everything Home Assistant needs to show and control the app. No secrets (token, passwords). */
+    private fun statusJson(ctx: Context, prefs: Prefs): JSONObject = JSONObject()
+        .put("app_version", appVersion(ctx))
+        .put("media_access", MediaListenerService.isEnabled(ctx))
+        .put("media_connected", MediaListenerService.connected)
+        .put("screen_capture", ScreenCaptureService.isRunning)
+        .put("source_mode", prefs.sourceMode.key)
+        .put("last_source", lastSource ?: JSONObject.NULL)
+        .put("enabled", prefs.enabled)
+        .put(
+            "settings",
+            JSONObject()
+                .put("corner_pct", prefs.cornerPct)
+                .put("saturation_pct", prefs.saturationPct)
+                .put("min_brightness_pct", prefs.minBrightnessPct)
+                .put("screen_interval", prefs.screenIntervalSec)
+                .put("stop_delay", prefs.stopDelaySec)
+                .put("boot_capture", prefs.bootCapture)
+                .put("profiles", prefs.profilesRaw)
+                .put("packages", prefs.allowedPackagesRaw)
+                .put("wled_enabled", prefs.wledEnabled)
+                .put("wled_devices", prefs.wledDevicesRaw)
+                .put("wled_brightness_pct", prefs.wledBrightnessPct)
+                .put("wled_restore", prefs.wledRestore)
+                .put("pulse", prefs.pulseEnabled)
+                .put("pulse_strength", prefs.pulseStrengthPct)
+                .put("mqtt_enabled", prefs.mqttEnabled),
+        )
+
+    /** Attach the current status to an outgoing payload (keeps HA in sync for free). */
+    private fun withStatus(ctx: Context?, prefs: Prefs, json: JSONObject): JSONObject {
+        if (ctx == null) return json
+        val st = statusJson(ctx, prefs)
+        lastStatusJson = st.toString()
+        return json.put("status", st)
+    }
+
+    private fun sendStatus(ctx: Context, prefs: Prefs, force: Boolean) {
+        val st = statusJson(ctx, prefs)
+        val text = st.toString()
+        if (!force && text == lastStatusJson) return
+        if (!prefs.isHaConfigured && !prefs.isMqttConfigured) return
+        lastStatusJson = text
+        val json = Payloads.status(current, device, st)
+        val body = json.toString()
+        if (prefs.isHaConfigured) for (id in prefs.webhookIds) HaClient.postJson(prefs.webhookUrl(id), body)
+        if (prefs.isMqttConfigured) mqtt.publish(prefs.mqttConfig(device, Build.MODEL ?: ""), json)
     }
 
     /** Send one payload to every configured output. ok = at least one output accepted it. */

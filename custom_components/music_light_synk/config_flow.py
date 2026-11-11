@@ -14,6 +14,7 @@ from homeassistant.data_entry_flow import section
 from homeassistant.helpers import selector
 
 from .const import (
+    CONF_ADB_ENTITY,
     CONF_BRIGHTNESS_MODE,
     CONF_EFFECT_MODE,
     CONF_EFFECT_NAME,
@@ -36,6 +37,13 @@ from .const import (
 WEBHOOK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{3,64}$")
 
 LIGHT_SELECTOR = selector.EntitySelector(selector.EntitySelectorConfig(domain="light", multiple=True))
+ADB_SELECTOR = selector.EntitySelector(selector.EntitySelectorConfig(integration="androidtv", domain="media_player"))
+
+
+def _tv_schema(opts: dict[str, Any]) -> vol.Schema:
+    return vol.Schema(
+        {vol.Optional(CONF_ADB_ENTITY, description={"suggested_value": opts.get(CONF_ADB_ENTITY)}): ADB_SELECTOR}
+    )
 
 
 def _lights_schema(opts: dict[str, Any]) -> vol.Schema:
@@ -92,6 +100,7 @@ def _options_schema(opts: dict[str, Any]) -> vol.Schema:
             vol.Required("brightness"): section(brightness, {"collapsed": True}),
             vol.Required("effects"): section(effects, {"collapsed": True}),
             vol.Required("stop"): section(stop, {"collapsed": True}),
+            vol.Required("tv"): section(_tv_schema(opts), {"collapsed": True}),
         }
     )
 
@@ -104,6 +113,7 @@ class MusicLightSynkConfigFlow(ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         self._name = DEFAULT_NAME
         self._webhook_id = DEFAULT_WEBHOOK_ID
+        self._lights: dict[str, Any] = {}
 
     @staticmethod
     @callback
@@ -143,12 +153,19 @@ class MusicLightSynkConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_lights(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
+            self._lights = user_input
+            return await self.async_step_tv()
+        return self.async_show_form(step_id="lights", data_schema=_lights_schema(DEFAULT_OPTIONS))
+
+    async def async_step_tv(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Optional: the Fire TV's Android Debug Bridge entity, to control the app from HA."""
+        if user_input is not None:
             return self.async_create_entry(
                 title=self._name,
                 data={CONF_WEBHOOK_ID: self._webhook_id},
-                options={**DEFAULT_OPTIONS, **user_input},
+                options={**DEFAULT_OPTIONS, **self._lights, **user_input},
             )
-        return self.async_show_form(step_id="lights", data_schema=_lights_schema(DEFAULT_OPTIONS))
+        return self.async_show_form(step_id="tv", data_schema=_tv_schema({}))
 
 
 class MusicLightSynkOptionsFlow(OptionsFlow):
@@ -160,6 +177,8 @@ class MusicLightSynkOptionsFlow(OptionsFlow):
             for value in user_input.values():
                 if isinstance(value, dict):
                     flat.update(value)
+            # A cleared ADB picker is omitted from the input: make that "no TV control".
+            flat.setdefault(CONF_ADB_ENTITY, None)
             return self.async_create_entry(data={**DEFAULT_OPTIONS, **flat})
         opts = {**DEFAULT_OPTIONS, **self.config_entry.options}
         return self.async_show_form(step_id="init", data_schema=_options_schema(opts))

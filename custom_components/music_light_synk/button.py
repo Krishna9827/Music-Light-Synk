@@ -8,7 +8,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import MusicLightSynkConfigEntry
-from .entity import MusicLightSynkEntity
+from .entity import MusicLightSynkEntity, TvAppEntity
 
 
 async def async_setup_entry(
@@ -17,7 +17,14 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Create the test button."""
-    async_add_entities([TestLightsButton(entry)])
+    async_add_entities(
+        [
+            TestLightsButton(entry),
+            TvCommandButton(entry, "grant_permissions", "Grant TV permissions", "mdi:shield-check", "grant_permissions"),
+            TvCommandButton(entry, "refresh_status", "Refresh TV app status", "mdi:refresh", "request_status"),
+            TvCommandButton(entry, "tv_test", "Send test colours from TV", "mdi:television-play", "send_test"),
+        ]
+    )
 
 
 class TestLightsButton(MusicLightSynkEntity, ButtonEntity):
@@ -35,3 +42,18 @@ class TestLightsButton(MusicLightSynkEntity, ButtonEntity):
 
     def _update_from_data(self) -> bool:
         return False
+
+
+class TvCommandButton(TvAppEntity, ButtonEntity):
+    """Runs one command on the TV through ADB."""
+
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, entry: MusicLightSynkConfigEntry, key: str, name: str, icon: str, method: str) -> None:
+        super().__init__(entry, key)
+        self._attr_name = name
+        self._attr_icon = icon
+        self._method = method
+
+    async def async_press(self) -> None:
+        await getattr(self._entry.runtime_data.app, self._method)()

@@ -168,44 +168,23 @@ class Prefs(context: Context) {
 
     // ---- WLED direct --------------------------------------------------------------------------
 
-    var wledMode: WledMode
-        get() = WledMode.of(str(K_WLED_MODE, WledMode.OFF.key))
-        set(v) = putStr(K_WLED_MODE, v.key)
+    /** Master switch for direct WLED output. */
+    var wledEnabled: Boolean
+        get() = sp.getBoolean(K_WLED_ENABLED, true)
+        set(v) = putBool(K_WLED_ENABLED, v)
 
-    /** Comma separated WLED IPs/hostnames. */
-    var wledHostsRaw: String
-        get() = str(K_WLED_HOSTS)
-        set(v) = putStr(K_WLED_HOSTS, v)
+    /**
+     * Every WLED device and the zone it shows, e.g.
+     * "192.168.1.60=ambient:40,22,40,22:bottom_left:cw; 192.168.1.61=top_left". See [WledDevices].
+     * Before v0.5 there was one WLED mode for all hosts; that is converted on the fly.
+     */
+    var wledDevicesRaw: String
+        get() = if (sp.contains(K_WLED_DEVICES)) str(K_WLED_DEVICES) else WledDevices.format(legacyWledDevices())
+        set(v) = putStr(K_WLED_DEVICES, WledDevices.format(WledDevices.parse(v).devices))
 
-    val wledHosts: List<String>
-        get() = wledHostsRaw.split(',', ';', ' ').map { it.trim().removePrefix("http://").trimEnd('/') }
-            .filter { it.isNotEmpty() }.distinct()
+    val wledDevices: List<WledDevice> get() = WledDevices.parse(wledDevicesRaw).devices
 
-    /** LED counts "top,right,bottom,left" for the ambient gradient. */
-    var wledLayoutRaw: String
-        get() = str(K_WLED_LAYOUT)
-        set(v) = putStr(K_WLED_LAYOUT, v)
-
-    var wledStart: Corner
-        get() = Corner.of(str(K_WLED_START, Corner.BOTTOM_LEFT.key))
-        set(v) = putStr(K_WLED_START, v.key)
-
-    var wledClockwise: Boolean
-        get() = sp.getBoolean(K_WLED_CW, true)
-        set(v) = putBool(K_WLED_CW, v)
-
-    /** Colour slots for WLED colours 1/2/3 in "colours" mode. */
-    var wledColorsRaw: String
-        get() = str(K_WLED_COLORS, "dominant,vibrant,average")
-        set(v) = putStr(K_WLED_COLORS, v)
-
-    var wledFx: Int
-        get() = sp.getInt(K_WLED_FX, -1).coerceIn(-1, 255)
-        set(v) = putInt(K_WLED_FX, v.coerceIn(-1, 255))
-
-    var wledPalette: Int
-        get() = sp.getInt(K_WLED_PAL, -1).coerceIn(-1, 255)
-        set(v) = putInt(K_WLED_PAL, v.coerceIn(-1, 255))
+    fun setWledDevices(devices: List<WledDevice>) = putStr(K_WLED_DEVICES, WledDevices.format(devices))
 
     var wledBrightnessPct: Int
         get() = sp.getInt(K_WLED_BRI, 100).coerceIn(1, 100)
@@ -223,22 +202,61 @@ class Prefs(context: Context) {
         get() = sp.getInt(K_PULSE_STRENGTH, 60).coerceIn(10, 100)
         set(v) = putInt(K_PULSE_STRENGTH, v.coerceIn(10, 100))
 
-    val isWledConfigured: Boolean get() = wledMode != WledMode.OFF && wledHosts.isNotEmpty()
+    val isWledConfigured: Boolean get() = wledEnabled && wledDevices.isNotEmpty()
 
     fun wledConfig() = WledConfig(
-        hosts = wledHosts,
-        mode = wledMode,
-        layout = WledLayout.parse(wledLayoutRaw, wledStart, wledClockwise),
-        colorSlots = wledColorsRaw.split(',', ';', ' ').mapNotNull { k ->
-            Slot.values().firstOrNull { it.key.equals(k.trim(), ignoreCase = true) }
-        }.ifEmpty { listOf(Slot.DOMINANT, Slot.VIBRANT, Slot.AVERAGE) }.take(3),
-        fx = wledFx,
-        palette = wledPalette,
+        devices = wledDevices,
         brightness = wledBrightnessPct / 100f,
         restore = wledRestore,
         pulse = pulseEnabled,
         pulseStrength = pulseStrengthPct / 100f,
     )
+
+    // v0.3 settings: one mode for all hosts. Still accepted over ADB and converted to devices.
+    var legacyWledMode: WledMode
+        get() = WledMode.of(str(K_WLED_MODE, WledMode.OFF.key))
+        set(v) = putStr(K_WLED_MODE, v.key)
+    var legacyWledHosts: String
+        get() = str(K_WLED_HOSTS)
+        set(v) = putStr(K_WLED_HOSTS, v)
+    var legacyWledLayout: String
+        get() = str(K_WLED_LAYOUT)
+        set(v) = putStr(K_WLED_LAYOUT, v)
+    var legacyWledStart: Corner
+        get() = Corner.of(str(K_WLED_START, Corner.BOTTOM_LEFT.key))
+        set(v) = putStr(K_WLED_START, v.key)
+    var legacyWledClockwise: Boolean
+        get() = sp.getBoolean(K_WLED_CW, true)
+        set(v) = putBool(K_WLED_CW, v)
+    var legacyWledColors: String
+        get() = str(K_WLED_COLORS, "dominant,vibrant,average")
+        set(v) = putStr(K_WLED_COLORS, v)
+    var legacyWledFx: Int
+        get() = sp.getInt(K_WLED_FX, -1).coerceIn(-1, 255)
+        set(v) = putInt(K_WLED_FX, v.coerceIn(-1, 255))
+    var legacyWledPalette: Int
+        get() = sp.getInt(K_WLED_PAL, -1).coerceIn(-1, 255)
+        set(v) = putInt(K_WLED_PAL, v.coerceIn(-1, 255))
+
+    fun legacyWledDevices(): List<WledDevice> {
+        val hosts = legacyWledHosts.split(',', ';', ' ').map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        val zone: WledZone = when (legacyWledMode) {
+            WledMode.OFF -> return emptyList()
+            WledMode.AMBIENT -> WledZone.Ambient(
+                WledLayout.parse(legacyWledLayout, legacyWledStart, legacyWledClockwise) ?: return emptyList(),
+            )
+            WledMode.COLORS -> WledZone.Palette(
+                legacyWledColors.split(',', ';', ' ').mapNotNull { k -> Slot.values().firstOrNull { it.key.equals(k.trim(), true) } }
+                    .ifEmpty { WledZone.DEFAULT_SLOTS }.take(3),
+                legacyWledFx,
+                legacyWledPalette,
+            )
+        }
+        return hosts.map { WledDevice(it, zone) }
+    }
+
+    /** After a legacy key was changed over ADB: rebuild the device list from the legacy settings. */
+    fun applyLegacyWled() = setWledDevices(legacyWledDevices())
 
     /** Anything at all to send to? */
     val hasOutput: Boolean get() = isHaConfigured || isMqttConfigured || isWledConfigured
@@ -274,6 +292,8 @@ class Prefs(context: Context) {
         private const val K_MQTT_TOPIC = "mqtt_topic"
         private const val K_MQTT_DISCOVERY = "mqtt_discovery"
         private const val K_MQTT_TLS = "mqtt_tls"
+        private const val K_WLED_ENABLED = "wled_enabled"
+        private const val K_WLED_DEVICES = "wled_devices"
         private const val K_WLED_MODE = "wled_mode"
         private const val K_WLED_HOSTS = "wled_hosts"
         private const val K_WLED_LAYOUT = "wled_layout"
