@@ -84,8 +84,8 @@ class MainActivity : Activity() {
         super.onResume()
         SyncEngine.addListener(refresher)
         MediaListenerService.requestRebindIfNeeded(this)
-        // The backup listener may only start while the app is on screen (Android rule for the mic).
-        if (prefs.listenerEnabled && !ListenerService.running && ListenerService.hasMicPermission(this)) {
+        // The microphone service may only start while the app is on screen (Android rule for the mic).
+        if (prefs.mode.mic && !ListenerService.running && ListenerService.hasMicPermission(this)) {
             ListenerService.start(this)
         }
         renderWledDevices()
@@ -118,6 +118,10 @@ class MainActivity : Activity() {
         page.addView(columns)
 
         // ---- left: what's happening
+        cardOf(left, "Mode", modeHelp()).apply {
+            addView(toggleButton({ "Mode: " + prefs.mode.label }) { cycleMode() }, fullWidth())
+        }
+
         cardOf(left, "Now playing").apply {
             nowTitle = text("Nothing playing", 20f, fg, bold = true).also { addView(it) }
             nowApp = text("", 14f, muted).also { addView(it) }
@@ -171,11 +175,11 @@ class MainActivity : Activity() {
             stepper(this, "Sensitivity", "%", 10, Prefs.SENSITIVITY_RANGE, { prefs.energySensitivityPct }, { prefs.energySensitivityPct = it })
             stepper(this, "Blur", "", 1, Prefs.BLUR_RANGE, { prefs.energyBlur }, { prefs.energyBlur = it })
             stepper(this, "Background brightness", "%", 5, Prefs.ENERGY_BG_RANGE, { prefs.energyBackgroundPct }, { prefs.energyBackgroundPct = it })
-            addView(toggleButton({ "Beat to Home Assistant lights: " + onOff(prefs.haBeats) }) {
-                prefs.haBeats = !prefs.haBeats
-                if (prefs.haBeats && !prefs.isHaConfigured) toast("Set the Home Assistant URL first (Home Assistant card)")
+            addView(toggleButton({ "Home Assistant lights: " + haMusicLabel(prefs.haMusic) }) {
+                prefs.haMusic = Prefs.HA_MUSIC[(Prefs.HA_MUSIC.indexOf(prefs.haMusic) + 1) % Prefs.HA_MUSIC.size]
+                if (prefs.haMusic != "off" && !prefs.isHaConfigured) toast("Set the Home Assistant URL first (Home Assistant card)")
             }, fullWidth())
-            addView(text("Pulses the lights you pick in Home Assistant (Music Light Synk → Configure → Beat sync) on every beat.", 12f, muted))
+            addView(text("Set the style in Home Assistant (device page → Music effect: beat pulse, energy or energy bars) and pick the lights under Configure → Music effect.", 12f, muted))
             addView(toggleButton({ "Beat pulse (gradient strips): " + onOff(prefs.pulseEnabled) }) {
                 prefs.pulseEnabled = !prefs.pulseEnabled
                 if (prefs.pulseEnabled) ensureAudioPermission()
@@ -194,13 +198,12 @@ class MainActivity : Activity() {
                 InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS, { prefs.room }, { prefs.room = it })
             field(this, "This device's name", android.os.Build.MODEL ?: "",
                 InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS, { prefs.deviceName }, { prefs.deviceName = it })
-            if (ListenerService.isSupported(this@MainActivity)) {
+            if (prefs.hasMic) {
                 addView(text(
-                    "Backup listener: keeps this phone's microphone on. Its own WLEDs bounce to music played anywhere nearby (iPhone, PC, ...), " +
-                        "in the last album's colours, and other devices can pick \"this phone's microphone\" as their audio source (e.g. the TV).",
+                    "To lend this phone's microphone to the TV (or another device), set Mode (top) to \"Lights + microphone\" or " +
+                        "\"Microphone only\", then pick this phone's microphone on the TV under Beat & audio → Listen to.",
                     12f, muted,
                 ))
-                addView(toggleButton({ "Backup listener (microphone on): " + onOff(prefs.listenerEnabled) }) { toggleListener() }, fullWidth())
             }
             addView(button("Save room and name", primary = true) { saveFields(silent = false) }, fullWidth())
         }
@@ -229,7 +232,6 @@ class MainActivity : Activity() {
             stepper(this, "Minimum brightness", "%", 5, Prefs.MIN_BRIGHTNESS_RANGE, { prefs.minBrightnessPct }, { prefs.minBrightnessPct = it })
             stepper(this, "Re-sample screen every (0 = per track)", "s", 5, Prefs.SCREEN_INTERVAL_RANGE, { prefs.screenIntervalSec }, { prefs.screenIntervalSec = it })
             stepper(this, "Send 'stopped' after a pause of", "s", 5, Prefs.STOP_DELAY_RANGE, { prefs.stopDelaySec }, { prefs.stopDelaySec = it })
-            addView(toggleButton({ "Syncing: " + onOff(prefs.enabled) }) { prefs.enabled = !prefs.enabled }, fullWidth())
             addView(toggleButton({ "Restart screen capture after reboot: " + onOff(prefs.bootCapture) }) {
                 prefs.bootCapture = !prefs.bootCapture
             }, fullWidth())
@@ -767,7 +769,7 @@ class MainActivity : Activity() {
         if (requestCode == 7) {
             val granted = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
             toast(if (granted) "Audio access granted: Energy and the beat pulse can hear the music" else "Energy and the beat pulse need audio access")
-            if (granted && prefs.listenerEnabled) ListenerService.start(this)
+            if (granted && prefs.mode.mic) ListenerService.start(this)
             settingsTouched()
         }
     }
@@ -783,26 +785,49 @@ class MainActivity : Activity() {
             prefs.audioSourceRaw = key
             if (key != AudioSource.OFF.key) ensureAudioPermission()
         }
-        if (key != AudioSource.MIC.key && prefs.listenerEnabled) {
-            prefs.listenerEnabled = false
+        if (key != AudioSource.MIC.key && prefs.mode.mic) {
+            prefs.mode = if (prefs.mode.lights) DeviceMode.LIGHTS else DeviceMode.OFF
             ListenerService.stop(this)
-            toast("Backup listener off: it uses this device's microphone")
+            toast("Mode is now \"${prefs.mode.label}\": lending the microphone needs it as audio source")
         }
     }
 
-    private fun toggleListener() {
-        prefs.listenerEnabled = !prefs.listenerEnabled
-        if (!prefs.listenerEnabled) {
+    /** Next mode; switches the microphone service on/off to match (allowed now: the app is on screen). */
+    private fun cycleMode() {
+        val modes = prefs.modes
+        val next = modes[(modes.indexOf(prefs.mode) + 1) % modes.size]
+        prefs.mode = next
+        if (next.mic) {
+            if (!ListenerService.hasMicPermission(this)) {
+                ensureAudioPermission(forListener = true) // starts in onRequestPermissionsResult
+            } else {
+                ensureAudioPermission(forListener = true)
+                if (!ListenerService.start(this)) toast("Could not switch the microphone on")
+            }
+        } else {
             ListenerService.stop(this)
-            return
         }
-        if (prefs.audioSource != AudioSource.MIC) {
-            prefs.audioSource = AudioSource.MIC // the listener hears through the mic; one source at a time
-            settingsTouched()
-        }
-        val hadMic = ListenerService.hasMicPermission(this)
-        ensureAudioPermission(forListener = true) // without the mic permission it starts in onRequestPermissionsResult
-        if (hadMic && !ListenerService.start(this)) toast("Could not start the backup listener")
+        toast(
+            when (next) {
+                DeviceMode.LIGHTS_MIC -> "This device's lights follow the music, and other devices can use its microphone"
+                DeviceMode.MIC -> "Only lending the microphone: this device's own lights are left alone"
+                DeviceMode.LIGHTS -> "This device's lights follow the music"
+                DeviceMode.OFF -> "Off: lights given back"
+            },
+        )
+    }
+
+    private fun modeHelp(): String = if (prefs.hasMic) {
+        "Lights + microphone: this phone's lights follow the music, and the TV can use its mic. " +
+            "Microphone only: just lend the mic (e.g. to the TV); this phone's lights are left alone. Lights only: no mic. Off: nothing."
+    } else {
+        "Lights: this device's lights (WLED, Home Assistant) follow the music. Off: lights are given back."
+    }
+
+    private fun haMusicLabel(v: String) = when (v) {
+        "beat" -> "Beat pulse"
+        "level" -> "Energy (music level)"
+        else -> "Off"
     }
 
     private fun toggleCapture() {

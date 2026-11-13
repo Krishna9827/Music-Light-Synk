@@ -10,13 +10,19 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.const import CONF_NAME, CONF_WEBHOOK_ID
 from homeassistant.core import callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.data_entry_flow import section
 from homeassistant.helpers import selector
+
+from homeassistant.helpers import entity_registry as er
 
 from .const import (
     CONF_ADB_ENTITY,
     CONF_BEAT_LIGHTS,
     CONF_BEAT_STRENGTH,
+    CONF_MUSIC_LIGHTS,
+    CONF_MUSIC_STRENGTH,
+    CONF_MUSIC_STYLE,
     CONF_BRIGHTNESS_MODE,
     CONF_EFFECT_MODE,
     CONF_EFFECT_NAME,
@@ -35,6 +41,10 @@ from .const import (
     LIGHT_SLOTS,
     lights_key,
 )
+from .wled_strips import strips, wled_hosts
+
+CONF_WLED_STRIPS = "wled_strips"
+WLED_SELECTOR = selector.EntitySelector(selector.EntitySelectorConfig(integration="wled", domain="light", multiple=True))
 
 WEBHOOK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{3,64}$")
 
@@ -70,7 +80,8 @@ def _percent() -> selector.NumberSelector:
     )
 
 
-def _options_schema(opts: dict[str, Any]) -> vol.Schema:
+def _options_schema(opts: dict[str, Any], wled_strip_entities: list[str] | None = None) -> vol.Schema:
+    wled_strip_entities = wled_strip_entities or []
     brightness = vol.Schema(
         {
             vol.Required(CONF_BRIGHTNESS_MODE, default=opts[CONF_BRIGHTNESS_MODE]): _select(["follow", "fixed"], CONF_BRIGHTNESS_MODE),
@@ -96,11 +107,15 @@ def _options_schema(opts: dict[str, Any]) -> vol.Schema:
     stop = vol.Schema(
         {vol.Required(CONF_ON_STOP, default=opts[CONF_ON_STOP]): _select(["restore", "off", "nothing"], CONF_ON_STOP)}
     )
-    beat = vol.Schema(
+    music_lights = opts.get(CONF_MUSIC_LIGHTS) or opts.get(CONF_BEAT_LIGHTS) or []
+    music = vol.Schema(
         {
-            vol.Optional(CONF_BEAT_LIGHTS, description={"suggested_value": opts[CONF_BEAT_LIGHTS]}): LIGHT_SELECTOR,
-            vol.Required(CONF_BEAT_STRENGTH, default=opts[CONF_BEAT_STRENGTH]): _percent(),
+            vol.Optional(CONF_MUSIC_LIGHTS, description={"suggested_value": music_lights}): LIGHT_SELECTOR,
+            vol.Required(CONF_MUSIC_STRENGTH, default=opts.get(CONF_MUSIC_STRENGTH, opts.get(CONF_BEAT_STRENGTH, 60))): _percent(),
         }
+    )
+    wled = vol.Schema(
+        {vol.Optional(CONF_WLED_STRIPS, description={"suggested_value": wled_strip_entities}): WLED_SELECTOR}
     )
     return vol.Schema(
         {
@@ -108,7 +123,8 @@ def _options_schema(opts: dict[str, Any]) -> vol.Schema:
             vol.Required("brightness"): section(brightness, {"collapsed": True}),
             vol.Required("effects"): section(effects, {"collapsed": True}),
             vol.Required("stop"): section(stop, {"collapsed": True}),
-            vol.Required("beat"): section(beat, {"collapsed": True}),
+            vol.Required("music"): section(music, {"collapsed": True}),
+            vol.Required("wled"): section(wled, {"collapsed": True}),
             vol.Required("tv"): section(_tv_schema(opts), {"collapsed": True}),
         }
     )
@@ -180,15 +196,65 @@ class MusicLightSynkConfigFlow(ConfigFlow, domain=DOMAIN):
 class MusicLightSynkOptionsFlow(OptionsFlow):
     """Lights per zone, brightness, effects and what happens when the music stops."""
 
+    def _wled_entity_hosts(self) -> dict[str, str]:
+        """Light entities of HA's WLED integration -> the WLED's host."""
+        hosts: dict[str, str] = {}
+        registry = er.async_get(self.hass)
+        for entry in self.hass.config_entries.async_entries("wled"):
+            host = entry.data.get("host")
+            if not isinstance(host, str):
+                continue
+            for ent in er.async_entries_for_config_entry(registry, entry.entry_id):
+                if ent.domain == "light":
+                    hosts[ent.entity_id] = host
+        return hosts
+
+    def _app_strip_entities(self) -> list[str]:
+        """HA's WLED light entities whose WLED is already in the app's list (one per WLED)."""
+        app_hosts = {s["host"] for s in strips(self.config_entry.runtime_data.status)}
+        picked: dict[str, str] = {}
+        for entity_id, host in self._wled_entity_hosts().items():
+            if host in app_hosts:
+                picked.setdefault(host, entity_id)
+        return list(picked.values())
+
+    async def _apply_wled_strips(self, chosen: list[str]) -> None:
+        """Add / remove WLEDs that Home Assistant knows in the app's list; others stay as they are."""
+        data = self.config_entry.runtime_data
+        current = strips(data.status)
+        ha_hosts = set(wled_hosts(self.hass))
+        by_entity = self._wled_entity_hosts()
+        wanted = {by_entity[e] for e in chosen if e in by_entity}
+        keep = [s["spec"] for s in current if s["host"] in wanted or s["host"] not in ha_hosts]
+        have = {s["host"] for s in current}
+        added = [f"{host}=dominant" for host in sorted(wanted - have)]
+        devices = "; ".join(keep + added)
+        if devices == "; ".join(s["spec"] for s in current):
+            return
+        await data.app.configure(wled_devices=devices)
+        data.set_setting("wled_devices", devices)
+
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        opts = {**DEFAULT_OPTIONS, **self.config_entry.options}
+        before = self._app_strip_entities()
         if user_input is not None:
             flat: dict[str, Any] = {}
             for value in user_input.values():
                 if isinstance(value, dict):
                     flat.update(value)
-            # A cleared ADB picker is omitted from the input: make that "no TV control".
+            # A cleared picker is omitted from the input: make that "none".
             flat.setdefault(CONF_ADB_ENTITY, None)
-            flat.setdefault(CONF_BEAT_LIGHTS, [])
-            return self.async_create_entry(data={**DEFAULT_OPTIONS, **flat})
-        opts = {**DEFAULT_OPTIONS, **self.config_entry.options}
-        return self.async_show_form(step_id="init", data_schema=_options_schema(opts))
+            flat.setdefault(CONF_MUSIC_LIGHTS, [])
+            chosen = flat.pop(CONF_WLED_STRIPS, [])
+            if sorted(chosen) != sorted(before):
+                try:
+                    await self._apply_wled_strips(chosen)
+                except HomeAssistantError:
+                    errors["base"] = "app_unreachable"
+            if not errors:
+                data = {**DEFAULT_OPTIONS, **flat, CONF_MUSIC_STYLE: opts.get(CONF_MUSIC_STYLE, "energy")}
+                data.pop(CONF_BEAT_LIGHTS, None)
+                data.pop(CONF_BEAT_STRENGTH, None)
+                return self.async_create_entry(data=data)
+        return self.async_show_form(step_id="init", data_schema=_options_schema(opts, before), errors=errors)

@@ -50,6 +50,7 @@ object SyncEngine {
     private const val PEER_PAL_TTL_MS = 10_000L
     private const val STATUS_MIN_INTERVAL_MS = 3000L
     private const val BEAT_MIN_MS = 200L
+    private const val LEVEL_MIN_MS = 120L
     private const val PEER_AUDIO_FRESH_MS = 3000L
 
     /** After a track change in screen mode, look again: apps animate the new cover in. */
@@ -127,6 +128,13 @@ object SyncEngine {
 
     @Volatile
     private var lastBeatAt = 0L
+
+    @Volatile
+    private var lastLevelSent = -1.0
+
+    /** "beat" or "level" while Home Assistant gets music data (see [beatUrls]). */
+    @Volatile
+    private var haMusicNow = "off"
     private var peerWaitNoted = false
 
     // device link
@@ -252,8 +260,11 @@ object SyncEngine {
                     schedulePoll(prefs, np)
                 }
             } else {
+                // Lights switched off (mode "Microphone only" / "Off"): give every light back now.
                 handler.removeCallbacks(pollTask)
+                endSession(app, prefs, "Lights off")
             }
+            syncListener(app, prefs)
             updateAudio(app, prefs)
             reevaluateWled(prefs)
         }
@@ -431,18 +442,23 @@ object SyncEngine {
     }
 
     private fun onStopTimeout() {
-        stopScheduled = false
         val ctx = appCtx ?: return
+        endSession(ctx, Prefs(ctx), "Playback stopped")
+    }
+
+    /** The music session ends: Home Assistant / MQTT get "stopped" (lights restored), WLED is let go. */
+    private fun endSession(ctx: Context, prefs: Prefs, label: String) {
+        handler.removeCallbacks(stopTask)
+        stopScheduled = false
         if (!sessionActive) return
-        val prefs = Prefs(ctx)
         sessionActive = false
-        val msg = deliver(prefs, withStatus(ctx, prefs, Payloads.stopped(current, device)), null, sessionStart = false, preview = false, label = "Playback stopped")
+        val msg = deliver(prefs, withStatus(ctx, prefs, Payloads.stopped(current, device)), null, sessionStart = false, preview = false, label = label)
         lastSent?.let { sendPal(current, it, playing = false) }
         lastSent = null
         currentKey = null
         lastSource = null
         handler.removeCallbacks(screenFollowUp)
-        setStatus(status.copy(lastResult = stamp("Playback stopped -> $msg")))
+        setStatus(status.copy(lastResult = stamp("$label -> $msg")))
         updateAudio(ctx, prefs)
         reevaluateWled(prefs) // a backup listener may light this device's strips now
     }
@@ -550,6 +566,11 @@ object SyncEngine {
         .put("source_mode", prefs.sourceMode.key)
         .put("last_source", lastSource ?: JSONObject.NULL)
         .put("enabled", prefs.enabled)
+        .put("mode", prefs.mode.key)
+        .put("modes", JSONArray(prefs.modes.map { it.key }))
+        .put("wled", JSONArray().apply {
+            for (d in prefs.wledDevices) put(wledJson(d))
+        })
         .put("audio", status.audio ?: audio.active ?: JSONObject.NULL)
         .put("audio_peer", status.audioPeerName ?: JSONObject.NULL)
         .put("audio_sources", JSONArray().apply {
@@ -577,6 +598,8 @@ object SyncEngine {
                 .put("pulse_strength", prefs.pulseStrengthPct)
                 .put("audio_source", prefs.audioSourceKey)
                 .put("ha_beats", prefs.haBeats)
+                .put("ha_music", prefs.haMusic)
+                .put("mode", prefs.mode.key)
                 .put("energy_sensitivity", prefs.energySensitivityPct)
                 .put("energy_blur", prefs.energyBlur)
                 .put("energy_bg", prefs.energyBackgroundPct)
@@ -585,6 +608,20 @@ object SyncEngine {
                 .put("room", prefs.room)
                 .put("mqtt_enabled", prefs.mqttEnabled),
         )
+
+    /** One WLED device for Home Assistant's per-strip controls ([spec] is what HA edits and sends back). */
+    private fun wledJson(d: WledDevice): JSONObject = JSONObject()
+        .put("host", d.host)
+        .put("zone", when (val z = d.zone) {
+            is WledZone.Section -> z.slot.key
+            is WledZone.Palette -> "palette"
+            is WledZone.Ambient -> "ambient"
+        })
+        .put("label", d.zone.label)
+        .put("energy", d.effect.energy)
+        .put("flip", d.effect.flip)
+        .put("mirror", d.effect.mirror)
+        .put("spec", "${d.host}=${WledDevices.formatDevice(d)}")
 
     /** Attach the current status to an outgoing payload (keeps HA in sync for free). */
     private fun withStatus(ctx: Context?, prefs: Prefs, json: JSONObject): JSONObject {
@@ -636,12 +673,29 @@ object SyncEngine {
     private fun updateAudio(ctx: Context, prefs: Prefs) {
         val playing = sessionActive || (current?.playing == true &&
             current?.let { prefs.profileFor(it.packageName) } != AppProfile.OFF)
-        val active = prefs.enabled && (playing || listenerActive)
+        val active = (prefs.enabled && playing) || listenerActive
         val want = if (active) prefs.audioSource else AudioSource.OFF
         val sens = prefs.energySensitivityPct / 100f
         main.post {
             audio.sensitivity = sens
             audio.start(ctx, want)
+        }
+    }
+
+    /**
+     * Keep the microphone service in line with the mode. Switching it on from the background is
+     * blocked on newer Android: then the note asks to open the app once.
+     */
+    private fun syncListener(ctx: Context, prefs: Prefs) {
+        val want = prefs.mode.mic
+        main.post {
+            if (want && !ListenerService.running) {
+                if (!ListenerService.start(ctx)) {
+                    handler.post { setStatus(status.copy(note = "Open the app on this phone once to switch the microphone on (Android rule)")) }
+                }
+            } else if (!want && ListenerService.running) {
+                ListenerService.stop(ctx)
+            }
         }
     }
 
@@ -651,7 +705,7 @@ object SyncEngine {
         localLoudAt = SystemClock.elapsedRealtime()
         if (audioPeer == null) {
             wled.audio(l)
-            maybeBeat(l)
+            toHomeAssistant(l)
         }
         // Devices that picked this one's microphone as their audio source.
         val me = selfId
@@ -665,7 +719,35 @@ object SyncEngine {
         peerNrgAt = now
         localLoudAt = now
         wled.audio(l)
-        maybeBeat(l)
+        toHomeAssistant(l)
+    }
+
+    private fun toHomeAssistant(l: AudioLevels) {
+        if (haMusicNow == "level") maybeLevel(l) else maybeBeat(l)
+    }
+
+    /**
+     * The music's level for Home Assistant's Energy effects, a few times a second: only when it
+     * moved, never more than one in flight (a newer level replaces a slow one, nothing queues).
+     */
+    private fun maybeLevel(l: AudioLevels) {
+        val urls = beatUrls
+        if (urls.isEmpty()) return
+        val now = SystemClock.elapsedRealtime()
+        val level = (maxOf(l.lows, l.mids * 0.8f) * 100).roundToInt() / 100.0
+        if (now - lastBeatAt < LEVEL_MIN_MS) return
+        if (Math.abs(level - lastLevelSent) < 0.05 && now - lastBeatAt < 1000) return
+        if (!beatBusy.compareAndSet(false, true)) return
+        lastBeatAt = now
+        lastLevelSent = level
+        val body = JSONObject().put("event", "level").put("level", level).put("beat", l.beat).put("device", device).toString()
+        beatExec.execute {
+            try {
+                for (u in urls) HaClient.postJson(u, body, null, connectTimeoutMs = 800, readTimeoutMs = 1200)
+            } finally {
+                beatBusy.set(false)
+            }
+        }
     }
 
     /** A beat for Home Assistant's lights: at most one in flight, none closer than [BEAT_MIN_MS]. */
@@ -917,9 +999,11 @@ object SyncEngine {
         return if (listening || peerPlaying) LightHub.PRIO_LISTENING else 0
     }
 
-    /** Beats go to Home Assistant while music plays here or is heard, if switched on. */
+    /** Beats / levels go to Home Assistant while music plays here or is heard, if its music effect is on. */
     private fun updateBeatTargets(prefs: Prefs, now: Long) {
-        val active = prefs.enabled && prefs.haBeats && prefs.isHaConfigured && (sessionActive || hearingMusic(prefs, now))
+        val music = prefs.haMusic
+        val active = prefs.enabled && music != "off" && prefs.isHaConfigured && (sessionActive || hearingMusic(prefs, now))
+        haMusicNow = music
         beatUrls = if (active) prefs.webhookIds.map { prefs.webhookUrl(it) } else emptyList()
     }
 

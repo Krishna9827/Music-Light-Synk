@@ -4,9 +4,14 @@ Same behaviour as the blueprint, without needing one: every zone is updated in p
 running effects are switched to solid (or to a chosen effect), and when the music stops the
 lights are restored to how they were before it started (or turned off).
 
-Beat sync: with the app's "Beat to Home Assistant lights" on, every beat pulses the chosen lights
-(brightness up, then back to the artwork brightness). A beat arriving while the previous pulse is
-still running is skipped, so slow lights never build up a backlog.
+Music effect (the device's "Music effect" select): the app sends either every beat or the music's
+level a few times a second, and the chosen lights
+ - beat pulse: jump in brightness on each beat and fall back,
+ - energy: follow the music's level with their brightness,
+ - energy bars: light up one after another, like an Energy bar made of bulbs.
+A beat arriving while the previous pulse runs is skipped and only the newest level is shown, so
+slow lights never build up a backlog. Lights that are off stay off. When the music data stops, the
+lights go back to their colour's brightness.
 """
 
 from __future__ import annotations
@@ -31,6 +36,9 @@ from homeassistant.helpers.state import async_reproduce_state
 from .const import (
     CONF_BEAT_LIGHTS,
     CONF_BEAT_STRENGTH,
+    CONF_MUSIC_LIGHTS,
+    CONF_MUSIC_STRENGTH,
+    CONF_MUSIC_STYLE,
     CONF_BRIGHTNESS_MODE,
     CONF_EFFECT_MODE,
     CONF_EFFECT_NAME,
@@ -52,6 +60,8 @@ _LOGGER = logging.getLogger(__name__)
 TEST_SECONDS = 6
 PULSE_HOLD_SECONDS = 0.12
 PULSE_FALL_SECONDS = 0.25
+LEVEL_TRANSITION = 0.15
+SETTLE_SECONDS = 3.0
 
 
 class LightController:
@@ -64,8 +74,13 @@ class LightController:
         self._task: asyncio.Task | None = None
         self._snapshot: list[State] | None = None
         self._beat_task: asyncio.Task | None = None
-        # Brightness we last gave each light (what a beat pulse returns to).
+        self._level_task: asyncio.Task | None = None
+        self._pending_level: float | None = None
+        self._settle: asyncio.TimerHandle | None = None
+        # Brightness each light has without the music effect (its colour's brightness).
         self._levels: dict[str, int] = {}
+        # Brightness the music effect showed last, per light.
+        self._shown: dict[str, int] = {}
 
     # ---- configuration ------------------------------------------------------------------
 
@@ -96,23 +111,90 @@ class LightController:
         elif event in ("colors", "test"):
             self._start(self.async_apply(payload.get("colors"), bool(payload.get("session_start"))))
 
-    def beat_lights(self) -> list[str]:
-        """Lights that pulse on the beat: the ones picked for it, else every mapped light."""
-        return list(self.options.get(CONF_BEAT_LIGHTS) or []) or self.all_lights()
+    def music_lights(self) -> list[str]:
+        """Lights for the music effect, in the order picked (energy bars go along it); empty = every mapped light."""
+        opts = self.options
+        return list(opts.get(CONF_MUSIC_LIGHTS) or opts.get(CONF_BEAT_LIGHTS) or []) or self.all_lights()
+
+    def _strength(self) -> float:
+        opts = self._get_options()
+        value = opts.get(CONF_MUSIC_STRENGTH, opts.get(CONF_BEAT_STRENGTH, DEFAULT_OPTIONS[CONF_MUSIC_STRENGTH]))
+        return max(0.05, min(1.0, float(value) / 100))
+
+    @staticmethod
+    def _level_of(payload: Mapping[str, Any]) -> float:
+        try:
+            return min(1.0, max(0.0, float(payload.get("level", 1.0))))
+        except (TypeError, ValueError):
+            return 1.0
 
     def beat(self, payload: Mapping[str, Any]) -> None:
         """A beat from the app. Skipped while the previous pulse still runs."""
         if not self.enabled or (self._beat_task is not None and not self._beat_task.done()):
             return
-        lights = self.beat_lights()
+        lights = self.music_lights()
         if not lights:
             return
-        try:
-            level = min(1.0, max(0.0, float(payload.get("level", 1.0))))
-        except (TypeError, ValueError):
-            level = 1.0
         self._beat_task = self.hass.async_create_background_task(
-            self._guard(self.async_pulse(lights, level)), "music_light_synk_beat"
+            self._guard(self.async_pulse(lights, self._level_of(payload))), "music_light_synk_beat"
+        )
+
+    def level(self, payload: Mapping[str, Any]) -> None:
+        """The music's level from the app (energy / energy bars). Only the newest one is shown."""
+        if not self.enabled or not self.music_lights():
+            return
+        self._pending_level = self._level_of(payload)
+        if self._level_task is None or self._level_task.done():
+            self._level_task = self.hass.async_create_background_task(self._guard(self._run_levels()), "music_light_synk_level")
+
+    async def _run_levels(self) -> None:
+        while self._pending_level is not None:
+            value, self._pending_level = self._pending_level, None
+            await self.async_show_level(value)
+        if self._settle is not None:
+            self._settle.cancel()
+        # No level for a while (music paused, effect switched off): back to the colour's brightness.
+        self._settle = self.hass.loop.call_later(
+            SETTLE_SECONDS, lambda: self.hass.async_create_background_task(self._guard(self.async_settle()), "music_light_synk_settle")
+        )
+
+    def _base(self, entity_id: str, state: State) -> int:
+        """The light's own brightness: what the colours set, else what it had when the effect first touched it."""
+        if entity_id not in self._levels:
+            self._levels[entity_id] = int(state.attributes.get(ATTR_BRIGHTNESS) or 200)
+        return self._levels[entity_id]
+
+    async def async_show_level(self, level: float) -> None:
+        """Energy: brightness follows the level. Energy bars: the lights fill up one after another."""
+        bars = self.options.get(CONF_MUSIC_STYLE) == "bars"
+        strength = self._strength()
+        on = [(e, s) for e in self.music_lights() if (s := self.hass.states.get(e)) is not None and s.state == STATE_ON]
+        n = len(on)
+        plan: dict[int, list[str]] = {}
+        for i, (entity_id, state) in enumerate(on):
+            base = self._base(entity_id, state)
+            fill = min(1.0, max(0.0, level * n - i)) if bars else level
+            target = max(1, round(base * ((1 - strength) + strength * fill)))
+            if abs(target - self._shown.get(entity_id, -100)) < 6:
+                continue
+            self._shown[entity_id] = target
+            plan.setdefault(target, []).append(entity_id)
+        await asyncio.gather(
+            *(self._call(LIGHT_DOMAIN, "turn_on", {ATTR_ENTITY_ID: ents, ATTR_BRIGHTNESS: b, ATTR_TRANSITION: LEVEL_TRANSITION})
+              for b, ents in plan.items())
+        )
+
+    async def async_settle(self) -> None:
+        """Music data stopped: lights the effect touched go back to their own brightness."""
+        shown, self._shown = self._shown, {}
+        plan: dict[int, list[str]] = {}
+        for entity_id in shown:
+            state = self.hass.states.get(entity_id)
+            if state is not None and state.state == STATE_ON and entity_id in self._levels:
+                plan.setdefault(self._levels[entity_id], []).append(entity_id)
+        await asyncio.gather(
+            *(self._call(LIGHT_DOMAIN, "turn_on", {ATTR_ENTITY_ID: ents, ATTR_BRIGHTNESS: b, ATTR_TRANSITION: 0.5})
+              for b, ents in plan.items())
         )
 
     def test(self) -> None:
@@ -179,14 +261,14 @@ class LightController:
 
     async def async_pulse(self, lights: list[str], level: float) -> None:
         """One beat: lights that are on jump in brightness, then fall back to their colour's brightness."""
-        strength = float(self.options[CONF_BEAT_STRENGTH]) / 100 * (0.6 + 0.4 * level)
+        strength = self._strength() * (0.6 + 0.4 * level)
         jump = max(25, round(255 * strength))
         plan: dict[tuple[int, int], list[str]] = {}
         for entity_id in lights:
             state = self.hass.states.get(entity_id)
             if state is None or state.state != STATE_ON:
                 continue  # never switch a light on just for a beat
-            base = self._levels.get(entity_id) or int(state.attributes.get(ATTR_BRIGHTNESS) or 128)
+            base = self._base(entity_id, state)
             # Up as far as there's room; only lights already near full dip instead, so the beat still shows.
             peak = min(255, base + jump) if 255 - base >= max(25, jump // 2) else max(1, base - jump)
             plan.setdefault((peak, base), []).append(entity_id)
@@ -204,6 +286,7 @@ class LightController:
 
     async def async_stop(self) -> None:
         self._levels.clear()
+        self._shown.clear()
         opts = self.options
         if opts[CONF_ON_STOP] == "restore":
             if self._snapshot:

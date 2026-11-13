@@ -64,3 +64,37 @@ class TvAppEntity(MusicLightSynkEntity):
         for key, value in values.items():
             data.set_setting(key, value)
         self.async_write_ha_state()
+
+
+class WledStripEntity(TvAppEntity):
+    """A control for one of the app's WLED strips (identified by its host)."""
+
+    def __init__(self, entry: MusicLightSynkConfigEntry, host: str, kind: str, label: str) -> None:
+        from .wled_strips import slug, strip_name  # noqa: PLC0415
+
+        super().__init__(entry, f"wled_{slug(host)}_{kind}")
+        self._host = host
+        self._attr_name = f"WLED {strip_name(entry.runtime_data.lights.hass, host)}: {label}"
+
+    @property
+    def strip(self) -> dict[str, Any] | None:
+        from .wled_strips import strips  # noqa: PLC0415
+
+        return next((s for s in strips(self._entry.runtime_data.status) if s["host"] == self._host), None)
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.strip is not None
+
+    async def _set_spec(self, new_spec: str) -> None:
+        from .wled_strips import replace_spec, strips  # noqa: PLC0415
+
+        data = self._entry.runtime_data
+        all_strips = strips(data.status)
+        devices = replace_spec(all_strips, self._host, new_spec)
+        await data.app.configure(wled_devices=devices)
+        # Optimistic: show the change until the app's next report confirms it.
+        for s in all_strips:
+            if s["host"] == self._host:
+                s["spec"] = new_spec
+        data.set_setting("wled_devices", devices)

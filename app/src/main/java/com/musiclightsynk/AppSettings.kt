@@ -57,7 +57,13 @@ object AppSettings {
         Opt("pulse", 'b') { p, v -> p.pulseEnabled = v as Boolean; "${p.pulseEnabled}" },
         Opt("pulse_strength", 'i') { p, v -> p.pulseStrengthPct = v as Int; "${p.pulseStrengthPct}" },
         Opt("audio_source", 's') { p, v -> p.audioSourceRaw = v as String; p.audioSourceKey },
-        Opt("ha_beats", 'b') { p, v -> p.haBeats = v as Boolean; "${p.haBeats}" },
+        Opt("ha_beats", 'b') { p, v -> p.haBeats = v as Boolean; p.haMusic },
+        Opt("ha_music", 's') { p, v -> p.haMusic = v as String; p.haMusic },
+        Opt("mode", 's') { p, v ->
+            val m = DeviceMode.of(v as String)
+            if (m != null && m in p.modes) p.mode = m
+            p.mode.key + if (m == null || m !in p.modes) " (unknown here; use " + p.modes.joinToString("/") { it.key } + ")" else ""
+        },
         Opt("energy_sensitivity", 'i') { p, v -> p.energySensitivityPct = v as Int; "${p.energySensitivityPct}" },
         Opt("energy_blur", 'i') { p, v -> p.energyBlur = v as Int; "${p.energyBlur}" },
         Opt("energy_bg", 'i') { p, v -> p.energyBackgroundPct = v as Int; "${p.energyBackgroundPct}" },

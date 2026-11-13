@@ -4,6 +4,23 @@ One version number for the whole project: the TV app (APK) and the Home Assistan
 integration are released together. Every release on GitHub has the APK, the integration zip
 and both blueprints attached.
 
+## v0.9.0
+
+Simpler, fewer switches:
+- **Mode**, one choice per device (app and Home Assistant): **Lights + microphone**, **Microphone
+  only** (lend the mic, e.g. to the TV, and leave this device's lights alone), **Lights only**,
+  **Off**. A TV offers Lights / Off. Replaces the *Syncing*, *Backup listener* and *TV syncing*
+  switches. Switching lights off gives every light back at once (Home Assistant restores, WLED
+  lets go): no more turning several things off and sending test colours.
+- **Music effect** for Home Assistant lights, one select: **Off**, **Beat pulse**, **Energy**
+  (brightness follows the music) or **Energy bars** (the picked lights fill up one after another).
+  Replaces the *Beat sync* switch; *Configure → Music effect on these lights* picks the lights.
+- **WLED strips in Home Assistant**: every WLED the app drives gets a *part* select (any edge or
+  corner, dominant / vibrant / average, WLED's own effect in album colours, ambient gradient) and
+  **Energy**, **Flip**, **Mirror** switches. *Configure → WLED strips* adds the WLEDs Home Assistant
+  already knows to the app.
+- The WLED gradient's beat pulse switch moved to the configuration section.
+
 ## v0.8.0
 
 - **Use another device's microphone**: a phone with its Backup listener on offers its microphone

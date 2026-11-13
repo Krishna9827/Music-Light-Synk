@@ -178,12 +178,14 @@ sent its first update (v0.7 and later); step 7 (ADB) is only needed for *Grant T
 | Is media access granted / screen capture running? | **Media access**, **Screen capture** binary sensors |
 | Switch album art ↔ screen capture | **Colour source mode**: Auto / Album art / Screen capture |
 | Start / stop screen capture | **Screen capture** switch |
-| Pause everything | **TV syncing** switch (the app) or **Light sync** switch (only HA's lights) |
+| What the device does | **Mode**: Lights + microphone / Microphone only / Lights only / Off (a TV: Lights / Off) |
+| Pause only HA's lights | **Light sync** switch |
+| Each WLED strip the app drives | **WLED (name): part** (edge, corner, dominant, ambient gradient, ...) and **Energy / Flip / Mirror** switches |
 | Beat pulse for WLED ambient strips | **Beat pulse** switch, **Pulse strength** number |
 | WLED devices and what each one shows | **WLED devices** text (format below), **WLED output**, **WLED brightness** |
 | Energy (bars to the beat) | `:energy`, `:flip`, `:mirror` in **WLED devices**; **Energy sensitivity**, **Energy blur**, **Energy background brightness** numbers |
 | What the app listens to | **Audio** sensor; change it with **Audio source**: Device audio / Microphone / another device's microphone (by name) / Off |
-| HA lights pulsing to the beat | **Beat sync (Home Assistant lights)** switch; lights under *Configure → Beat sync* (step 13) |
+| HA lights moving with the music | **Music effect**: Beat pulse / Energy / Energy bars; lights under *Configure → Music effect on these lights* (step 13) |
 | Phone ↔ TV link | **WLED driven by** sensor (attribute `linked_devices`), **Device link** switch |
 | Per-app profiles | **Per-app profiles** text, e.g. `com.google.android.youtube.tv=screen;com.netflix.ninja=off` |
 | Edge size, saturation, minimum brightness, re-sample interval, stop delay | Numbers under *Configuration* |
@@ -262,13 +264,16 @@ no Fire TV needed.
    (**Add integration → Music Light Synk**) with that same webhook ID, pick the bedroom's lights,
    and leave the Fire TV step empty. As soon as the phone sends its first update, every control on
    its device page works over Wi-Fi.
-7. Optional, **Backup listener (mic): ON** (allow the microphone and notifications): the phone's
-   WLEDs bounce to music played nearby on anything (iPhone, Mac, PC on the speakers) in the last
-   album's colours. After a phone restart, open the app once so Android lets it use the mic again.
+7. **Mode** (top of the app): **Lights + microphone** (allow the microphone and notifications): the
+   phone's WLEDs bounce to music played nearby on anything (iPhone, Mac, PC on the speakers) in the
+   last album's colours, and the TV can use its mic. **Microphone only** if the phone should just
+   lend its mic and leave its own lights alone. After a phone restart, open the app once so Android
+   lets it use the mic again.
 
 ### 12. The phone's microphone for the TV (HDMI passthrough)
 
-1. On the phone: **Backup listener (microphone on): ON**. Leave the phone in the TV room.
+1. On the phone: **Mode → Microphone only** (just the TV's lights) or **Lights + microphone** (the
+   phone's lights too). Leave the phone in the TV room.
 2. On the TV: **Beat & audio** → press **Listen to** until it says **(phone name)'s microphone
    (Wi-Fi)**. Or in Home Assistant, on the TV's device page: **Audio source** → the phone's microphone.
 3. Play music on the TV. *Beat & audio* shows **Hearing: (phone)'s microphone over Wi-Fi**, and the
@@ -277,16 +282,24 @@ no Fire TV needed.
 
 The name is the phone's *This device's name* (*Other devices* card).
 
-### 13. Home Assistant lights to the beat
+### 13. Home Assistant lights with the music
 
-1. In Home Assistant: **Music Light Synk → Configure → Beat sync**: pick the lights that should
-   pulse (empty = all your Music Light Synk lights) and the pulse strength. **Submit**. This also
-   switches on **Beat sync (Home Assistant lights)** on the device page.
-2. Play music. Each beat (from that device's audio source, e.g. the phone's mic for the TV) makes
-   those lights jump in brightness and fade back.
+1. In Home Assistant: **Music Light Synk → Configure → Music effect on these lights**: pick the
+   lights (empty = all your Music Light Synk lights; for Energy bars in order, bottom to top) and
+   the strength. **Submit**.
+2. On the device page: **Music effect** → **Beat pulse** (jump on every beat), **Energy**
+   (brightness follows the music) or **Energy bars** (the lights fill up one after another).
+3. Play music. The music comes from that device's audio source, e.g. the phone's mic for the TV.
 
-Fast local lights (Hue, Zigbee, ESPHome, WLED through HA) keep up with the beat; Tuya and other
-cloud bulbs lag behind it, so leave those out of *Beat sync*.
+Fast local lights (Hue, Zigbee, ESPHome, WLED through HA) keep up; Tuya and other cloud bulbs lag
+behind, so leave those out.
+
+### 14. WLED strips from Home Assistant
+
+**Configure → WLED strips (driven by the app)**: pick the WLEDs you already have in Home Assistant
+and **Submit**: they're added to the app. Each gets controls on the device page: **WLED (name):
+part** (which part of the artwork, or *Ambient gradient* / *WLED's own effect in album colours*)
+and **Energy**, **Flip**, **Mirror**. Don't also pick such a WLED under *Lights*.
 
 ---
 
@@ -303,8 +316,9 @@ Look at the TV's device page first:
 | Controls are *unavailable* | The app hasn't reported to HA yet: check the HA URL and webhook ID in the app, and that *Home Assistant may change settings over Wi-Fi* is ON. (*Grant TV permissions* needs step 7.) |
 | An app shows *did not provide album art* | That app doesn't share artwork. Set **Colour source mode** to *Auto* and turn on **Screen capture** |
 | Energy strip shows still colours | **Audio** says *Not listening* or the TV hears silence: grant audio access (step 10), or HDMI passthrough is on (use the phone's microphone, step 12) |
-| The phone's microphone isn't in the TV's list | The phone's **Backup listener** must be ON, on the same Wi-Fi, with **Device link** on on both |
-| HA lights don't pulse | **Beat sync (Home Assistant lights)** on, lights picked under *Configure → Beat sync* and switched on, and the device's **Audio** sensor isn't *Not listening* |
+| The phone's microphone isn't in the TV's list | The phone's **Mode** must include the microphone, on the same Wi-Fi, with **Device link** on on both |
+| The phone's own lights react while it's only a mic for the TV | Set the phone's **Mode** to **Microphone only** (its lights are given back right away) |
+| HA lights don't move with the music | **Music effect** isn't Off, lights picked under *Configure → Music effect on these lights* and switched on, and the device's **Audio** sensor isn't *Not listening* |
 | Phone doesn't find the TV | Same Wi-Fi, not a guest network, and no "AP / client isolation" on the router. **Device link** on on both, same **Room** for sharing the beat |
 | Colours change late | Update to v0.7: the WLEDs now get the colours first. If *Last:* in the app shows an HA error, the device can't reach Home Assistant |
 
@@ -327,6 +341,11 @@ And a live log: `adb logcat -s MusicLightSynk` (Ctrl+C to stop).
    ```
 2. **Integration:** HACS shows an update. Click **Update**, then restart HA. Settings are kept.
    (Blueprint users: re-import the blueprint, then *Developer tools → YAML → Reload automations*.)
+
+**Coming from v0.8:** the *TV syncing*, *Backup listener* and *Beat sync* switches became **Mode**
+and **Music effect** (selects). Your settings carry over: a phone with the backup listener on starts
+in *Lights + microphone*, and beat sync becomes Music effect *Beat pulse*. Old switches that show as
+unavailable in Home Assistant can be deleted.
 
 **Coming from v0.6:** each device now keeps its own WLED list (no more copying between TV and
 phone): check the phone's list. Set a **Room** on the phone if it's somewhere else, and pick

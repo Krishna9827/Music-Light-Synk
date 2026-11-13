@@ -18,6 +18,22 @@ enum class SourceMode(val key: String, val label: String) {
     }
 }
 
+/**
+ * What this device does, in one choice (phones get all four; a TV, with no microphone, gets
+ * Lights / Off). [lights]: drives its own lights (WLED, Home Assistant, MQTT) from what it plays
+ * or hears. [mic]: keeps its microphone on and lends it to other devices (e.g. the TV).
+ */
+enum class DeviceMode(val key: String, val label: String, val lights: Boolean, val mic: Boolean) {
+    LIGHTS_MIC("lights_mic", "Lights + microphone", true, true),
+    MIC("mic", "Microphone only (lend it to other devices)", false, true),
+    LIGHTS("lights", "Lights only", true, false),
+    OFF("off", "Off", false, false);
+
+    companion object {
+        fun of(key: String?): DeviceMode? = values().firstOrNull { it.key.equals(key?.trim(), ignoreCase = true) }
+    }
+}
+
 /** All user settings. Cheap to construct; reads straight from SharedPreferences every time. */
 class Prefs(context: Context) {
     private val sp: SharedPreferences =
@@ -25,6 +41,31 @@ class Prefs(context: Context) {
 
     /** Fire TV / Android TV (no mic, plays the music itself) vs phone / tablet. */
     val isTv: Boolean by lazy { context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK) }
+
+    /** Has a microphone the app can lend (phones). */
+    val hasMic: Boolean by lazy { !isTv && context.packageManager.hasSystemFeature(PackageManager.FEATURE_MICROPHONE) }
+
+    /** The modes this device offers. */
+    val modes: List<DeviceMode> get() = if (hasMic) DeviceMode.values().toList() else listOf(DeviceMode.LIGHTS, DeviceMode.OFF)
+
+    /**
+     * What this device does. Older versions had "syncing" and "backup listener" switches; they are
+     * read as a mode until one is chosen. A mode with the microphone also makes it the audio source.
+     */
+    var mode: DeviceMode
+        get() {
+            val m = DeviceMode.of(str(K_MODE)) ?: when {
+                !sp.getBoolean(K_ENABLED, true) -> if (sp.getBoolean(K_LISTENER, false)) DeviceMode.MIC else DeviceMode.OFF
+                sp.getBoolean(K_LISTENER, false) -> DeviceMode.LIGHTS_MIC
+                else -> DeviceMode.LIGHTS
+            }
+            return if (m in modes) m else if (m.lights) DeviceMode.LIGHTS else DeviceMode.OFF
+        }
+        set(v) {
+            val e = sp.edit().putString(K_MODE, v.key)
+            if (v.mic) e.putString(K_AUDIO_SOURCE, AudioSource.MIC.key) // the lent microphone is also what it listens to
+            e.apply()
+        }
 
     private fun str(k: String, def: String = "") = sp.getString(k, def) ?: def
     private fun putStr(k: String, v: String) = sp.edit().putString(k, v.trim()).apply()
@@ -76,9 +117,17 @@ class Prefs(context: Context) {
     /** Effective source for an app: its profile, or the global source mode. */
     fun sourceModeFor(pkg: String): SourceMode = profileFor(pkg).sourceMode ?: sourceMode
 
+    /** Drives its own lights (see [mode]). Kept for older ADB / Home Assistant commands ("enabled"). */
     var enabled: Boolean
-        get() = sp.getBoolean(K_ENABLED, true)
-        set(v) = putBool(K_ENABLED, v)
+        get() = mode.lights
+        set(v) {
+            mode = when {
+                v && mode.mic -> DeviceMode.LIGHTS_MIC
+                v -> DeviceMode.LIGHTS
+                mode.mic -> DeviceMode.MIC
+                else -> DeviceMode.OFF
+            }
+        }
 
     /** Re-open the screen-capture permission after a reboot (only matters for Screen/Auto). */
     var bootCapture: Boolean
@@ -252,10 +301,21 @@ class Prefs(context: Context) {
         get() = str(K_AUDIO_PEER_NAME).ifBlank { "other device" }
         set(v) = putStr(K_AUDIO_PEER_NAME, v.take(40))
 
-    /** Send each beat to Home Assistant, which pulses the lights picked there. */
+    /**
+     * What goes to Home Assistant for its music effect: "off", "beat" (every beat, for the beat
+     * pulse) or "level" (the music's level a few times a second, for Energy / Energy bars).
+     * Home Assistant sets it to match the effect picked there.
+     */
+    var haMusic: String
+        get() = str(K_HA_MUSIC).takeIf { it in HA_MUSIC } ?: if (sp.getBoolean(K_HA_BEATS, false)) "beat" else "off"
+        set(v) = putStr(K_HA_MUSIC, v.trim().lowercase().takeIf { it in HA_MUSIC } ?: "off")
+
+    /** v0.8 switch: on = beats. */
     var haBeats: Boolean
-        get() = sp.getBoolean(K_HA_BEATS, false)
-        set(v) = putBool(K_HA_BEATS, v)
+        get() = haMusic != "off"
+        set(v) {
+            haMusic = if (v) "beat" else "off"
+        }
 
     val defaultAudioSource: AudioSource get() = if (isTv) AudioSource.OUTPUT else AudioSource.MIC
 
@@ -312,8 +372,15 @@ class Prefs(context: Context) {
 
     /** Phone as backup listener: keeps the mic on and drives this device's WLEDs when it hears music. */
     var listenerEnabled: Boolean
-        get() = sp.getBoolean(K_LISTENER, false)
-        set(v) = putBool(K_LISTENER, v)
+        get() = mode.mic
+        set(v) {
+            mode = when {
+                v && mode.lights -> DeviceMode.LIGHTS_MIC
+                v -> DeviceMode.MIC
+                mode.lights -> DeviceMode.LIGHTS
+                else -> DeviceMode.OFF
+            }
+        }
 
     // v0.3 settings: one mode for all hosts. Still accepted over ADB and converted to devices.
     var legacyWledMode: WledMode
@@ -415,6 +482,9 @@ class Prefs(context: Context) {
         private const val K_ROOM = "room"
         private const val K_AUDIO_PEER_NAME = "audio_peer_name"
         private const val K_HA_BEATS = "ha_beats"
+        private const val K_HA_MUSIC = "ha_music"
+        private const val K_MODE = "mode"
+        val HA_MUSIC = listOf("off", "beat", "level")
         const val PEER_PREFIX = "peer:"
         private val PEER_ID = Regex("[A-Za-z0-9]{1,40}")
 

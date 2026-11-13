@@ -116,19 +116,30 @@
               "adb_entity": "Fire TV (Android Debug Bridge, optional)"
             }
           },
-          "beat": {
-            "name": "Beat sync",
-            "description": "With 'Beat sync (Home Assistant lights)' on (switch on the device page, or 'Beat to Home Assistant lights' in the app), these lights pulse on every beat. Fast local lights (Hue, Zigbee, ESPHome, WLED) keep up; cloud bulbs like Tuya lag behind.",
+          "music": {
+            "name": "Music effect on these lights",
+            "description": "Pick the style with the device's 'Music effect' select: Beat pulse (brightness jumps on every beat), Energy (brightness follows the music) or Energy bars (the lights below fill up one after another, in the order picked, like an Energy bar made of bulbs). Fast local lights (Hue, Zigbee, ESPHome, WLED) keep up; cloud bulbs like Tuya lag behind.",
             "data": {
-              "beat_lights": "Lights that pulse on the beat",
-              "beat_strength": "Pulse strength"
+              "music_lights": "Lights for the music effect",
+              "music_strength": "Strength"
             },
             "data_description": {
-              "beat_lights": "Leave empty to pulse every light picked under Lights. Lights that are off stay off."
+              "music_lights": "Leave empty to use every light picked under Lights. For Energy bars, pick them in order (bottom to top). Lights that are off stay off.",
+              "music_strength": "How much the brightness moves with the music."
+            }
+          },
+          "wled": {
+            "name": "WLED strips (driven by the app)",
+            "description": "WLEDs the app drives itself, fast, with the Energy effect, flip / mirror and the ambient gradient. Pick the WLEDs you already have in Home Assistant to add them to the app; each then gets 'part', Energy, Flip and Mirror controls on this device page. Don't also pick a WLED here under Lights, or the two will fight over it.",
+            "data": {
+              "wled_strips": "WLED strips for the app"
             }
           }
         }
       }
+    },
+    "error": {
+      "app_unreachable": "The app didn't answer. Is the device on, with the app reporting to Home Assistant?"
     }
   },
   "selector": {
@@ -178,6 +189,22 @@
           "auto": "Auto: album art, screen if no art",
           "artwork": "Album art (media access)",
           "screen": "Screen capture"
+        }
+      },
+      "mode": {
+        "state": {
+          "lights_mic": "Lights + microphone",
+          "mic": "Microphone only (lend it to other devices)",
+          "lights": "Lights only",
+          "off": "Off"
+        }
+      },
+      "music_effect": {
+        "state": {
+          "off": "Off",
+          "beat": "Beat pulse",
+          "energy": "Energy",
+          "bars": "Energy bars"
         }
       }
     }

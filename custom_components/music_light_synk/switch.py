@@ -12,7 +12,8 @@ from homeassistant.helpers.restore_state import RestoreEntity
 
 from . import MusicLightSynkConfigEntry
 from .const import APP_SWITCHES, AppSetting
-from .entity import MusicLightSynkEntity, TvAppEntity
+from .entity import MusicLightSynkEntity, TvAppEntity, WledStripEntity
+from .wled_strips import set_flag, track_strips
 
 
 async def async_setup_entry(
@@ -24,6 +25,10 @@ async def async_setup_entry(
     entities: list[SwitchEntity] = [LightSyncSwitch(entry), ScreenCaptureSwitch(entry)]
     entities += [AppSettingSwitch(entry, setting) for setting in APP_SWITCHES]
     async_add_entities(entities)
+    track_strips(
+        hass, entry, async_add_entities,
+        lambda host: [WledFlagSwitch(entry, host, flag) for flag in ("energy", "flip", "mirror")],
+    )
 
 
 class LightSyncSwitch(MusicLightSynkEntity, SwitchEntity, RestoreEntity):
@@ -103,3 +108,40 @@ class AppSettingSwitch(TvAppEntity, SwitchEntity):
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self._send(**{self._setting.key: False})
+
+
+class WledFlagSwitch(WledStripEntity, SwitchEntity):
+    """Energy (bars bounce with the music), Flip or Mirror for one of the app's WLED strips."""
+
+    _ICONS = {"energy": "mdi:equalizer", "flip": "mdi:swap-horizontal", "mirror": "mdi:flip-horizontal"}
+    _LABELS = {"energy": "Energy", "flip": "Flip", "mirror": "Mirror"}
+
+    def __init__(self, entry: MusicLightSynkConfigEntry, host: str, flag: str) -> None:
+        super().__init__(entry, host, flag, self._LABELS[flag])
+        self._flag = flag
+        self._attr_icon = self._ICONS[flag]
+
+    @property
+    def available(self) -> bool:
+        strip = self.strip
+        # A "WLED's own effect" strip runs WLED's effect: bars don't apply there.
+        return super().available and strip is not None and strip.get("zone") != "palette"
+
+    @property
+    def is_on(self) -> bool | None:
+        strip = self.strip
+        return bool(strip.get(self._flag)) if strip else None
+
+    async def _set(self, on: bool) -> None:
+        strip = self.strip
+        if strip is None:
+            return
+        await self._set_spec(set_flag(strip["spec"], self._flag, on))
+        strip[self._flag] = on
+        self.async_write_ha_state()
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self._set(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self._set(False)
