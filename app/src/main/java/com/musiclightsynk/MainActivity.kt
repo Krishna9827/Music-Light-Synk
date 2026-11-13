@@ -162,23 +162,20 @@ class MainActivity : Activity() {
 
         cardOf(
             right, "Beat & audio",
-            "Energy bars and the beat pulse listen to the music, from exactly the source you pick here (it never switches by itself). " +
-                "Device audio: what this device plays (Fire TV; not with HDMI passthrough to a soundbar). Microphone: music from any speaker in the room.",
+            "Energy bars, the beat pulse and Home Assistant beats listen to exactly the source you pick here (it never switches by itself). " +
+                "Device audio: what this device plays (not with HDMI passthrough to a soundbar). Microphone: music from any speaker in the room. " +
+                "Or another device's microphone over Wi-Fi, e.g. your phone's for the TV (its Backup listener must be on).",
         ).apply {
             hearingStatus = text("", 13f, muted).also { addView(it) }
-            addView(toggleButton({ "Listen to: ${prefs.audioSource.label}" }) {
-                val next = prefs.audioSource.next().let { if (it == AudioSource.MIC && !ListenerService.isSupported(this@MainActivity)) it.next() else it }
-                prefs.audioSource = next
-                if (next != AudioSource.OFF) ensureAudioPermission()
-                if (next != AudioSource.MIC && prefs.listenerEnabled) {
-                    prefs.listenerEnabled = false
-                    ListenerService.stop(this@MainActivity)
-                    toast("Backup listener off: it needs the microphone")
-                }
-            }, fullWidth())
+            addView(toggleButton({ "Listen to: " + SyncEngine.audioLabel(this@MainActivity) }) { cycleAudioSource() }, fullWidth())
             stepper(this, "Sensitivity", "%", 10, Prefs.SENSITIVITY_RANGE, { prefs.energySensitivityPct }, { prefs.energySensitivityPct = it })
             stepper(this, "Blur", "", 1, Prefs.BLUR_RANGE, { prefs.energyBlur }, { prefs.energyBlur = it })
             stepper(this, "Background brightness", "%", 5, Prefs.ENERGY_BG_RANGE, { prefs.energyBackgroundPct }, { prefs.energyBackgroundPct = it })
+            addView(toggleButton({ "Beat to Home Assistant lights: " + onOff(prefs.haBeats) }) {
+                prefs.haBeats = !prefs.haBeats
+                if (prefs.haBeats && !prefs.isHaConfigured) toast("Set the Home Assistant URL first (Home Assistant card)")
+            }, fullWidth())
+            addView(text("Pulses the lights you pick in Home Assistant (Music Light Synk → Configure → Beat sync) on every beat.", 12f, muted))
             addView(toggleButton({ "Beat pulse (gradient strips): " + onOff(prefs.pulseEnabled) }) {
                 prefs.pulseEnabled = !prefs.pulseEnabled
                 if (prefs.pulseEnabled) ensureAudioPermission()
@@ -199,11 +196,11 @@ class MainActivity : Activity() {
                 InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS, { prefs.deviceName }, { prefs.deviceName = it })
             if (ListenerService.isSupported(this@MainActivity)) {
                 addView(text(
-                    "Backup listener: keeps this phone's mic on, so its WLEDs bounce to music played anywhere nearby (iPhone, PC, ...), " +
-                        "in the last album's colours. Uses the microphone as audio source.",
+                    "Backup listener: keeps this phone's microphone on. Its own WLEDs bounce to music played anywhere nearby (iPhone, PC, ...), " +
+                        "in the last album's colours, and other devices can pick \"this phone's microphone\" as their audio source (e.g. the TV).",
                     12f, muted,
                 ))
-                addView(toggleButton({ "Backup listener (mic): " + onOff(prefs.listenerEnabled) }) { toggleListener() }, fullWidth())
+                addView(toggleButton({ "Backup listener (microphone on): " + onOff(prefs.listenerEnabled) }) { toggleListener() }, fullWidth())
             }
             addView(button("Save room and name", primary = true) { saveFields(silent = false) }, fullWidth())
         }
@@ -703,10 +700,13 @@ class MainActivity : Activity() {
             s.peers.isEmpty() -> "Other devices: none found yet"
             else -> "Other devices: " + s.peers.joinToString(", ")
         })
-        hearingStatus.text = when (s.audio) {
-            AudioEngine.SRC_OUTPUT -> "Hearing: device audio"
-            AudioEngine.SRC_MIC -> "Hearing: microphone"
-            else -> if (prefs.audioSource == AudioSource.OFF) "Audio is off" else "Not listening right now: starts when music plays here, or with the backup listener"
+        hearingStatus.text = when {
+            s.audio == AudioEngine.SRC_OUTPUT -> "Hearing: device audio"
+            s.audio == AudioEngine.SRC_MIC -> "Hearing: microphone"
+            s.audio == "peer" -> "Hearing: ${s.audioPeerName}'s microphone over Wi-Fi"
+            prefs.audioPeerId != null -> "Waiting for ${prefs.audioPeerName}'s microphone: its Backup listener must be on, on the same Wi-Fi"
+            prefs.audioSourceKey == AudioSource.OFF.key -> "Audio is off"
+            else -> "Not listening right now: starts when music plays here, or with the backup listener"
         }
         linkStatus.text = if (!prefs.linkEnabled) {
             "Link is off: this device works on its own."
@@ -769,6 +769,24 @@ class MainActivity : Activity() {
             toast(if (granted) "Audio access granted: Energy and the beat pulse can hear the music" else "Energy and the beat pulse need audio access")
             if (granted && prefs.listenerEnabled) ListenerService.start(this)
             settingsTouched()
+        }
+    }
+
+    /** Next audio source: device audio, this device's mic, other devices' mics (by name), off. */
+    private fun cycleAudioSource() {
+        val options = SyncEngine.audioOptions(this)
+        val i = options.indexOfFirst { it.first == prefs.audioSourceKey }
+        val (key, label) = options[(i + 1) % options.size]
+        if (key.startsWith(Prefs.PEER_PREFIX)) {
+            prefs.setAudioPeer(key.removePrefix(Prefs.PEER_PREFIX), label.substringBefore("'s microphone"))
+        } else {
+            prefs.audioSourceRaw = key
+            if (key != AudioSource.OFF.key) ensureAudioPermission()
+        }
+        if (key != AudioSource.MIC.key && prefs.listenerEnabled) {
+            prefs.listenerEnabled = false
+            ListenerService.stop(this)
+            toast("Backup listener off: it uses this device's microphone")
         }
     }
 

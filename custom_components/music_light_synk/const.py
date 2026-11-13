@@ -46,6 +46,8 @@ CONF_EFFECT_NAME = "effect_name"
 CONF_PALETTE_SELECTS = "palette_selects"
 CONF_PALETTE_OPTION = "palette_option"
 CONF_ON_STOP = "on_stop"
+CONF_BEAT_LIGHTS = "beat_lights"
+CONF_BEAT_STRENGTH = "beat_strength"
 
 DEFAULT_OPTIONS: dict[str, Any] = {
     **{lights_key(slot): [] for slot in LIGHT_SLOTS},
@@ -58,6 +60,8 @@ DEFAULT_OPTIONS: dict[str, Any] = {
     CONF_PALETTE_SELECTS: [],
     CONF_PALETTE_OPTION: "* Color 1",
     CONF_ON_STOP: "restore",
+    CONF_BEAT_LIGHTS: [],
+    CONF_BEAT_STRENGTH: 40,
 }
 
 EFFECT_SUGGESTIONS = [
@@ -103,7 +107,9 @@ APP_LISTENER = f"{APP_PACKAGE}/{APP_PACKAGE}.MediaListenerService"
 SOURCE_MODES = ["auto", "artwork", "screen"]
 
 # Where Energy strips / beat pulse get their audio: exactly one, never switched by the app.
+# The app also offers other devices' microphones ("peer:<id>"), listed in its status.
 AUDIO_SOURCES = ["output", "mic", "off"]
+AUDIO_SOURCE_LABELS = {"output": "Device audio", "mic": "Microphone", "off": "Off"}
 
 
 @dataclass(frozen=True)
@@ -123,6 +129,7 @@ class AppSetting:
 APP_SWITCHES: list[AppSetting] = [
     AppSetting("enabled", "TV syncing", "mdi:sync", config=False),
     AppSetting("pulse", "Beat pulse", "mdi:pulse", config=False),
+    AppSetting("ha_beats", "Beat sync (Home Assistant lights)", "mdi:music-circle", config=False),
     AppSetting("wled_enabled", "WLED output", "mdi:led-strip-variant"),
     AppSetting("wled_restore", "Restore WLED when music stops", "mdi:restore"),
     AppSetting("boot_capture", "Restart screen capture after reboot", "mdi:restart"),

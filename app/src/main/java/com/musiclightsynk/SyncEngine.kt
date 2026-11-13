@@ -14,6 +14,9 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.CopyOnWriteArraySet
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.roundToInt
 
 /**
  * The brain. Decides *when* to send colours so the lights get one command per change
@@ -25,8 +28,9 @@ import java.util.concurrent.CopyOnWriteArraySet
  * never hold the lights up.
  *
  * Every device has its own WLED list. With the device link on, devices that list the same WLED
- * take turns on it ([LightHub], per WLED host), and devices in the same room share the beat and
- * the album colours (a phone's mic can feed a TV that can't hear its own audio).
+ * take turns on it ([LightHub], per WLED host); a device can use another device's microphone as
+ * its audio source (a phone's mic for a TV that can't hear its own audio); devices in the same
+ * room share the album colours. Beats can also go to Home Assistant, which pulses its lights.
  *
  * All state below is only touched on the engine thread unless marked otherwise.
  */
@@ -45,6 +49,8 @@ object SyncEngine {
     private const val HUB_START_MS = 3000L
     private const val PEER_PAL_TTL_MS = 10_000L
     private const val STATUS_MIN_INTERVAL_MS = 3000L
+    private const val BEAT_MIN_MS = 200L
+    private const val PEER_AUDIO_FRESH_MS = 3000L
 
     /** After a track change in screen mode, look again: apps animate the new cover in. */
     private val SCREEN_FOLLOW_UPS_MS = longArrayOf(1200L, 3500L)
@@ -56,8 +62,10 @@ object SyncEngine {
         val palette: Palette? = null,
         val source: String? = null,
         val note: String? = null,
-        /** "output" / "mic" while listening to music, else null. */
+        /** "output" / "mic" while listening to music, "peer" while another device's mic streams to us, else null. */
         val audio: String? = null,
+        /** Name of the device whose microphone this one uses (when the audio source is one). */
+        val audioPeerName: String? = null,
         /** Names of the other devices running the app (with their room). */
         val peers: List<String> = emptyList(),
         /** Who drives this device's WLED strips: "This device", another device's name, or null. */
@@ -104,10 +112,22 @@ object SyncEngine {
     private var localLoudAt = 0L
 
     @Volatile
-    private var peerNrgFrom: String? = null
+    private var peerNrgAt = 0L
+
+    /** Id of the device whose microphone we use, or null (from the settings). */
+    @Volatile
+    private var audioPeer: String? = null
+
+    // beats to Home Assistant: their own thread, dropped (not queued) while one is in flight
+    private val beatExec = Executors.newSingleThreadExecutor { r -> Thread(r, "mls-beat").apply { isDaemon = true } }
+    private val beatBusy = AtomicBoolean(false)
 
     @Volatile
-    private var peerNrgAt = 0L
+    private var beatUrls: List<String> = emptyList()
+
+    @Volatile
+    private var lastBeatAt = 0L
+    private var peerWaitNoted = false
 
     // device link
     @Volatile
@@ -224,6 +244,7 @@ object SyncEngine {
             main.post { audio.resetFailures() }
             sendStatus(app, prefs, force = false)
             hubShown = null // re-send the hub's colours with the new settings
+            if (link != null) sendHello(app, prefs, SystemClock.elapsedRealtime()) // e.g. "now listening to your mic"
             if (prefs.enabled) {
                 val np = current
                 if (np != null && np.playing && prefs.profileFor(np.packageName) != AppProfile.OFF) {
@@ -529,7 +550,11 @@ object SyncEngine {
         .put("source_mode", prefs.sourceMode.key)
         .put("last_source", lastSource ?: JSONObject.NULL)
         .put("enabled", prefs.enabled)
-        .put("audio", audio.active ?: JSONObject.NULL)
+        .put("audio", status.audio ?: audio.active ?: JSONObject.NULL)
+        .put("audio_peer", status.audioPeerName ?: JSONObject.NULL)
+        .put("audio_sources", JSONArray().apply {
+            for ((k, label) in audioOptions(ctx)) put(JSONObject().put("key", k).put("label", label))
+        })
         .put("listening", listenerActive)
         .put("link_peers", JSONArray(status.peers))
         .put("wled_renderer", status.renderer ?: JSONObject.NULL)
@@ -550,7 +575,8 @@ object SyncEngine {
                 .put("wled_restore", prefs.wledRestore)
                 .put("pulse", prefs.pulseEnabled)
                 .put("pulse_strength", prefs.pulseStrengthPct)
-                .put("audio_source", prefs.audioSource.key)
+                .put("audio_source", prefs.audioSourceKey)
+                .put("ha_beats", prefs.haBeats)
                 .put("energy_sensitivity", prefs.energySensitivityPct)
                 .put("energy_blur", prefs.energyBlur)
                 .put("energy_bg", prefs.energyBackgroundPct)
@@ -619,26 +645,69 @@ object SyncEngine {
         }
     }
 
-    /** Audio thread (main or mic). */
+    /** Audio thread (main or mic): this device's own audio. */
     private fun onLocalLevels(l: AudioLevels, silent: Boolean) {
         if (silent) return
         localLoudAt = SystemClock.elapsedRealtime()
-        wled.audio(l)
-        val r = room
-        link?.sendToPeers(LinkProtocol.Nrg(selfId, l)) { p -> p.room?.let { LinkProtocol.sameRoom(it, r) } == true }
+        if (audioPeer == null) {
+            wled.audio(l)
+            maybeBeat(l)
+        }
+        // Devices that picked this one's microphone as their audio source.
+        val me = selfId
+        link?.sendToPeers(LinkProtocol.Nrg(me, l)) { p -> p.src == me }
     }
 
-    /** Link thread: a same-room device's levels, used while this device hears nothing itself. */
+    /** Link thread: levels from the device whose microphone we picked. */
     private fun onPeerLevels(from: String, l: AudioLevels) {
-        val peerRoom = link?.peer(from)?.room ?: return
-        if (!LinkProtocol.sameRoom(peerRoom, room)) return
+        if (from != audioPeer) return
         val now = SystemClock.elapsedRealtime()
-        if (now - localLoudAt < 500) return
-        val current = peerNrgFrom
-        if (current != null && current != from && now - peerNrgAt < 500) return // stick to one peer
-        peerNrgFrom = from
         peerNrgAt = now
+        localLoudAt = now
         wled.audio(l)
+        maybeBeat(l)
+    }
+
+    /** A beat for Home Assistant's lights: at most one in flight, none closer than [BEAT_MIN_MS]. */
+    private fun maybeBeat(l: AudioLevels) {
+        if (!l.beat) return
+        val urls = beatUrls
+        if (urls.isEmpty()) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastBeatAt < BEAT_MIN_MS || !beatBusy.compareAndSet(false, true)) return
+        lastBeatAt = now
+        val level = (maxOf(l.lows, l.overall) * 100).roundToInt() / 100.0
+        val body = JSONObject().put("event", "beat").put("level", level).put("device", device).toString()
+        beatExec.execute {
+            try {
+                for (u in urls) HaClient.postJson(u, body, null, connectTimeoutMs = 800, readTimeoutMs = 1200)
+            } finally {
+                beatBusy.set(false)
+            }
+        }
+    }
+
+    /**
+     * Audio sources to choose from, as (key, label): this device's own, the microphones of linked
+     * devices that offer theirs, and off. The chosen one is always listed, even while it's away.
+     */
+    fun audioOptions(ctx: Context): List<Pair<String, String>> {
+        val prefs = Prefs(ctx)
+        val out = ArrayList<Pair<String, String>>()
+        out += AudioSource.OUTPUT.key to AudioSource.OUTPUT.label
+        if (ListenerService.isSupported(ctx)) out += AudioSource.MIC.key to "This device's microphone"
+        val peers = link?.peers()?.filter { it.mic && it.id != selfId }?.sortedBy { it.name } ?: emptyList()
+        for (p in peers) out += (Prefs.PEER_PREFIX + p.id) to "${p.name}'s microphone (Wi-Fi)"
+        val chosen = prefs.audioPeerId
+        if (chosen != null && peers.none { it.id == chosen }) out += (Prefs.PEER_PREFIX + chosen) to "${prefs.audioPeerName}'s microphone (not found right now)"
+        out += AudioSource.OFF.key to AudioSource.OFF.label
+        return out
+    }
+
+    /** Label of the current audio source, as in [audioOptions]. */
+    fun audioLabel(ctx: Context): String {
+        val key = Prefs(ctx).audioSourceKey
+        return audioOptions(ctx).firstOrNull { it.first == key }?.second ?: key
     }
 
     // ---- device link and Wi-Fi control -----------------------------------------------------------
@@ -650,6 +719,8 @@ object SyncEngine {
             hub = LightHub(selfId)
         }
         room = prefs.room
+        audioPeer = prefs.audioPeerId
+        audioPeer?.let { id -> link?.peer(id)?.name?.let { n -> if (n != prefs.audioPeerName) prefs.audioPeerName = n } }
         val l = link
         if (prefs.linkEnabled && l == null) {
             val nl = Link(selfId) { m -> onLinkMessage(m) }
@@ -761,6 +832,7 @@ object SyncEngine {
             if (sessionActive && sent != null && now - lastPalAt >= HELLO_MS) sendPal(current, sent, playing = true)
         }
         reevaluateWled(prefs)
+        updateBeatTargets(prefs, now)
         updateLinkStatus(ctx, prefs, now)
         if (!heartbeatScheduled && (link != null || listenerActive || driven.isNotEmpty() || control != null)) {
             heartbeatScheduled = true
@@ -771,7 +843,10 @@ object SyncEngine {
     private fun sendHello(ctx: Context, prefs: Prefs, now: Long) {
         val l = link ?: return
         lastHiAt = now
-        l.broadcast(LinkProtocol.Hi(selfId, deviceName(prefs), if (prefs.isTv) "tv" else "phone", prefs.room, listenerActive))
+        val micShared = listenerActive && prefs.audioSource == AudioSource.MIC
+        l.broadcast(
+            LinkProtocol.Hi(selfId, deviceName(prefs), if (prefs.isTv) "tv" else "phone", prefs.room, listenerActive, micShared, audioPeer ?: ""),
+        )
     }
 
     /** Share what's playing with devices in the same room. */
@@ -795,9 +870,17 @@ object SyncEngine {
             driven.isNotEmpty() -> "This device"
             else -> hub.othersOn(mine, now).firstOrNull()?.let { id -> link?.peer(id)?.name ?: id }
         }
-        val a = audio.active
-        if (peers != status.peers || renderer != status.renderer || a != status.audio) {
-            setStatus(status.copy(peers = peers, renderer = renderer, audio = a))
+        val peerId = audioPeer
+        val a = if (peerId != null) (if (now - peerNrgAt < PEER_AUDIO_FRESH_MS) "peer" else null) else audio.active
+        val peerName = if (peerId != null) prefs.audioPeerName else null
+        if (peerId != null && a == null && sessionActive && !peerWaitNoted) {
+            peerWaitNoted = true
+            setStatus(status.copy(note = "Waiting for $peerName's microphone: turn on its microphone (Backup listener) in the app on that phone"))
+        } else if (a != null) {
+            peerWaitNoted = false
+        }
+        if (peers != status.peers || renderer != status.renderer || a != status.audio || peerName != status.audioPeerName) {
+            setStatus(status.copy(peers = peers, renderer = renderer, audio = a, audioPeerName = peerName))
             sendStatus(ctx, prefs, force = false) // rate-limited on the network thread
         }
     }
@@ -807,20 +890,37 @@ object SyncEngine {
     private fun myHosts(prefs: Prefs): Set<String> =
         if (!prefs.isWledConfigured) emptySet() else prefs.wledDevices.map { LinkProtocol.normHost(it.host) }.toSet()
 
-    /** Priority this device would drive its WLEDs with right now (0 = it doesn't want to). */
-    private fun wantedPrio(prefs: Prefs, now: Long): Int {
-        if (!prefs.enabled || !prefs.isWledConfigured) return 0
-        if (sessionActive) return LightHub.PRIO_PLAYING
-        if (!listenerActive) return 0
-        // Backup listener: music heard for a few seconds (not just a door slam), kept until it
-        // has been quiet for the stop delay. Or a device in this room plays and shares its colours.
+    /**
+     * Music heard without playing it here: through the backup listener's mic, or another device's
+     * mic picked as audio source. True after a few seconds of sound (not just a door slam), until it
+     * has been quiet for the stop delay.
+     */
+    private fun hearingMusic(prefs: Prefs, now: Long): Boolean {
+        if (!listenerActive && audioPeer == null) {
+            soundSince = 0L
+            return false
+        }
         val heard = now - localLoudAt < 1500
         if (heard && soundSince == 0L) soundSince = now
         val quietLimit = maxOf(prefs.stopDelaySec, 5) * 1000L
         if (!heard && now - localLoudAt > quietLimit) soundSince = 0L
-        val listening = soundSince != 0L && now - soundSince >= HUB_START_MS
-        val peerPlaying = peerPal?.playing == true && now - peerPalAt < PEER_PAL_TTL_MS
+        return soundSince != 0L && now - soundSince >= HUB_START_MS
+    }
+
+    /** Priority this device would drive its WLEDs with right now (0 = it doesn't want to). */
+    private fun wantedPrio(prefs: Prefs, now: Long): Int {
+        if (!prefs.enabled || !prefs.isWledConfigured) return 0
+        if (sessionActive) return LightHub.PRIO_PLAYING
+        val listening = hearingMusic(prefs, now)
+        // Or a device in this room plays and shares its colours.
+        val peerPlaying = (listenerActive || audioPeer != null) && peerPal?.playing == true && now - peerPalAt < PEER_PAL_TTL_MS
         return if (listening || peerPlaying) LightHub.PRIO_LISTENING else 0
+    }
+
+    /** Beats go to Home Assistant while music plays here or is heard, if switched on. */
+    private fun updateBeatTargets(prefs: Prefs, now: Long) {
+        val active = prefs.enabled && prefs.haBeats && prefs.isHaConfigured && (sessionActive || hearingMusic(prefs, now))
+        beatUrls = if (active) prefs.webhookIds.map { prefs.webhookUrl(it) } else emptyList()
     }
 
     private fun playingFor(prio: Int, now: Long): Long = when (prio) {

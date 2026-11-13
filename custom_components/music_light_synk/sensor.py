@@ -137,7 +137,7 @@ class AudioSensor(MusicLightSynkEntity, SensorEntity):
     _attr_name = "Audio"
     _attr_translation_key = "audio"
     _attr_device_class = SensorDeviceClass.ENUM
-    _attr_options = ["output", "mic", "none"]
+    _attr_options = ["output", "mic", "peer", "none"]
 
     def __init__(self, entry: MusicLightSynkConfigEntry) -> None:
         super().__init__(entry, "audio")
@@ -153,9 +153,10 @@ class AudioSensor(MusicLightSynkEntity, SensorEntity):
         if not st:
             return False
         audio = st.get("audio")
-        self._attr_native_value = audio if audio in ("output", "mic") else "none"
+        self._attr_native_value = audio if audio in ("output", "mic", "peer") else "none"
         self._attr_extra_state_attributes = {
             "audio_source": self._entry.runtime_data.setting("audio_source"),
+            "other_device": st.get("audio_peer"),
             "backup_listener": bool(st.get("listening")),
         }
         return True

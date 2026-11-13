@@ -25,7 +25,7 @@ from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .app_control import AppControl, valid_control_url
-from .const import CONF_ADB_ENTITY, CONF_CONTROL_TOKEN, CONF_CONTROL_URL, DOMAIN, EVENT_NAME, signal_update
+from .const import CONF_ADB_ENTITY, CONF_BEAT_LIGHTS, CONF_CONTROL_TOKEN, CONF_CONTROL_URL, DOMAIN, EVENT_NAME, signal_update
 from .light_control import LightController
 
 _LOGGER = logging.getLogger(__name__)
@@ -55,6 +55,7 @@ class MusicLightSynkData:
     # Where the last colours came from: "artwork" (media access), "screen", "test".
     source: str | None = None
     adb_entity: str | None = None
+    beat_lights: list[str] = field(default_factory=list)
 
     def setting(self, key: str) -> Any:
         """A TV app setting from the latest status (top level or under 'settings')."""
@@ -95,6 +96,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MusicLightSynkConfigEntr
         lights=LightController(hass, lambda: entry.options),
         app=AppControl(hass, lambda: entry.options, lambda: entry.data),
         adb_entity=entry.options.get(CONF_ADB_ENTITY),
+        beat_lights=list(entry.options.get(CONF_BEAT_LIGHTS) or []),
     )
     webhook_id: str = entry.data[CONF_WEBHOOK_ID]
 
@@ -107,6 +109,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: MusicLightSynkConfigEntr
             return web.Response(status=400, text="body must be JSON")
         if not isinstance(data, dict):
             return web.Response(status=400, text="body must be a JSON object")
+        if data.get("event") == "beat":
+            # Several a second: only pulse the lights (no entity updates, no bus event).
+            entry.runtime_data.lights.beat(data)
+            return web.Response(status=200)
         _remember_control(hass, entry, data.pop("control", None))
         entry.runtime_data.apply(data)
         entry.runtime_data.lights.handle(data)  # ignores "status" payloads
@@ -168,6 +174,17 @@ async def _async_options_updated(hass: HomeAssistant, entry: MusicLightSynkConfi
     """Light options apply live; a new TV (ADB entity) needs a reload to re-check the controls."""
     if entry.options.get(CONF_ADB_ENTITY) != entry.runtime_data.adb_entity:
         await hass.config_entries.async_reload(entry.entry_id)
+        return
+    beat_lights = list(entry.options.get(CONF_BEAT_LIGHTS) or [])
+    data = entry.runtime_data
+    if beat_lights and not data.beat_lights and data.app.available and not data.setting("ha_beats"):
+        # Beat lights just picked: switch on the app's "Beat to Home Assistant lights" too.
+        try:
+            await data.app.configure(ha_beats=True)
+            data.set_setting("ha_beats", True)
+        except Exception as err:  # noqa: BLE001 - the device may be off; the switch is there too
+            _LOGGER.debug("Could not switch on beats in the app: %s", err)
+    data.beat_lights = beat_lights
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: MusicLightSynkConfigEntry) -> bool:

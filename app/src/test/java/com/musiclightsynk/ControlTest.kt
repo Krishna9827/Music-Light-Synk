@@ -103,6 +103,17 @@ class ControlTest {
     }
 
     @Test
+    fun audioSourceKeysIncludeOtherDevicesMicrophones() {
+        assertEquals("mic", Prefs.normalizeAudioKey(" MIC "))
+        assertEquals("output", Prefs.normalizeAudioKey("output"))
+        assertEquals("peer:3fa9c01b2e", Prefs.normalizeAudioKey("peer:3fa9c01b2e"))
+        assertNull("v0.6's auto: the device's default", Prefs.normalizeAudioKey("auto"))
+        assertNull(Prefs.normalizeAudioKey("peer:"))
+        assertNull(Prefs.normalizeAudioKey("peer:../etc"))
+        assertNull(Prefs.normalizeAudioKey(null))
+    }
+
+    @Test
     fun audioSourceIsAlwaysOneFixedChoice() {
         assertEquals(AudioSource.MIC, AudioSource.of("mic"))
         assertEquals(AudioSource.OUTPUT, AudioSource.of(" Output "))

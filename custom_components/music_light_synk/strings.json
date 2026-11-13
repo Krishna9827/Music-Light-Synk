@@ -115,6 +115,17 @@
             "data": {
               "adb_entity": "Fire TV (Android Debug Bridge, optional)"
             }
+          },
+          "beat": {
+            "name": "Beat sync",
+            "description": "With 'Beat sync (Home Assistant lights)' on (switch on the device page, or 'Beat to Home Assistant lights' in the app), these lights pulse on every beat. Fast local lights (Hue, Zigbee, ESPHome, WLED) keep up; cloud bulbs like Tuya lag behind.",
+            "data": {
+              "beat_lights": "Lights that pulse on the beat",
+              "beat_strength": "Pulse strength"
+            },
+            "data_description": {
+              "beat_lights": "Leave empty to pulse every light picked under Lights. Lights that are off stay off."
+            }
           }
         }
       }
@@ -156,7 +167,8 @@
         "state": {
           "output": "Device audio",
           "mic": "Microphone",
-          "none": "Not listening"
+          "none": "Not listening",
+          "peer": "Another device's microphone"
         }
       }
     },
@@ -166,13 +178,6 @@
           "auto": "Auto: album art, screen if no art",
           "artwork": "Album art (media access)",
           "screen": "Screen capture"
-        }
-      },
-      "audio_source": {
-        "state": {
-          "output": "Device audio",
-          "mic": "Microphone",
-          "off": "Off"
         }
       }
     }

@@ -222,18 +222,40 @@ class Prefs(context: Context) {
     // ---- Audio and the Energy effect ---------------------------------------------------------
 
     /**
-     * Exactly one source, never switched automatically. Default: device audio on a TV, the
-     * microphone on a phone (phones rarely let apps hear other apps' audio). Older "auto" counts
-     * as the default.
+     * Exactly one source, never switched automatically: "output" (device audio), "mic", "off", or
+     * "peer:<id>" (another device's microphone over Wi-Fi). Default: device audio on a TV, the
+     * microphone on a phone (phones rarely let apps hear other apps' audio). Older "auto" counts as
+     * the default.
      */
+    val audioSourceKey: String
+        get() = normalizeAudioKey(str(K_AUDIO_SOURCE)) ?: defaultAudioSource.key
+
+    /** The device whose microphone this one uses, or null. */
+    val audioPeerId: String? get() = audioSourceKey.takeIf { it.startsWith(PEER_PREFIX) }?.removePrefix(PEER_PREFIX)
+
+    /** What this device listens to itself (OFF while it uses another device's microphone). */
     var audioSource: AudioSource
-        get() = AudioSource.of(str(K_AUDIO_SOURCE)) ?: defaultAudioSource
+        get() = AudioSource.of(audioSourceKey) ?: AudioSource.OFF
         set(v) = putStr(K_AUDIO_SOURCE, v.key)
 
     /** Free text from ADB / Home Assistant; anything unknown means the default. */
     var audioSourceRaw: String
-        get() = audioSource.key
-        set(v) = putStr(K_AUDIO_SOURCE, AudioSource.of(v)?.key ?: "")
+        get() = audioSourceKey
+        set(v) = putStr(K_AUDIO_SOURCE, normalizeAudioKey(v) ?: "")
+
+    /** Use another device's microphone (see [audioPeerId]); [name] is shown while it's away. */
+    fun setAudioPeer(id: String, name: String) {
+        sp.edit().putString(K_AUDIO_SOURCE, PEER_PREFIX + id).putString(K_AUDIO_PEER_NAME, name).apply()
+    }
+
+    var audioPeerName: String
+        get() = str(K_AUDIO_PEER_NAME).ifBlank { "other device" }
+        set(v) = putStr(K_AUDIO_PEER_NAME, v.take(40))
+
+    /** Send each beat to Home Assistant, which pulses the lights picked there. */
+    var haBeats: Boolean
+        get() = sp.getBoolean(K_HA_BEATS, false)
+        set(v) = putBool(K_HA_BEATS, v)
 
     val defaultAudioSource: AudioSource get() = if (isTv) AudioSource.OUTPUT else AudioSource.MIC
 
@@ -391,6 +413,20 @@ class Prefs(context: Context) {
         private const val K_PULSE = "pulse"
         private const val K_PULSE_STRENGTH = "pulse_strength"
         private const val K_ROOM = "room"
+        private const val K_AUDIO_PEER_NAME = "audio_peer_name"
+        private const val K_HA_BEATS = "ha_beats"
+        const val PEER_PREFIX = "peer:"
+        private val PEER_ID = Regex("[A-Za-z0-9]{1,40}")
+
+        /** "output" / "mic" / "off" / "peer:<id>", or null for anything else. */
+        fun normalizeAudioKey(raw: String?): String? {
+            val v = raw?.trim() ?: return null
+            if (v.startsWith(PEER_PREFIX, ignoreCase = true)) {
+                val id = v.substring(PEER_PREFIX.length)
+                return if (PEER_ID.matches(id)) PEER_PREFIX + id else null
+            }
+            return AudioSource.of(v)?.key
+        }
         private const val K_CONTROL = "control_enabled"
         private const val K_CONTROL_TOKEN = "control_token"
         private const val K_AUDIO_SOURCE = "audio_source"

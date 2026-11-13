@@ -17,7 +17,9 @@ them **once per track change** to any mix of:
 The same app runs on an **Android phone**, fully on its own: its own WLED list, its own room,
 controlled from Home Assistant over Wi-Fi (no Fire TV or ADB needed). Devices in the same room can
 share the beat, and the phone can be a **backup listener**: its mic hears music played anywhere
-else (an iPhone, a PC on the speakers) and keeps its strips moving to the beat.
+else (an iPhone, a PC on the speakers) and keeps its strips moving to the beat. A TV that can't
+hear its own audio (HDMI passthrough to a soundbar) can use **the phone's microphone**, picked by
+name in the app or in Home Assistant. And Home Assistant lights can **pulse to the beat** too.
 
 No Raspberry Pi, no HDMI grabber, and no continuous colour stream, so slow cloud bulbs like Tuya
 keep up.
@@ -237,9 +239,10 @@ adb shell am broadcast -n com.musiclightsynk/.AdbCommandReceiver -a com.musiclig
 Where the audio comes from (`audio_source`), exactly one, never switched by the app:
 **output** (device audio: what this device plays, Android's `Visualizer`; the default on a TV),
 **mic** (the microphone; the default on a phone, since phones rarely let apps hear other apps'
-audio) or **off**. If the chosen source hears nothing, the app says so instead of switching. With
-HDMI passthrough, where Android never sees the TV's audio, a phone in the same room running the
-backup listener sends its mic levels to the TV instead (next section).
+audio), **another device's microphone** over Wi-Fi (listed by name, e.g. *Pixel 8's microphone*;
+`peer:<id>` over ADB), or **off**. If the chosen source hears nothing, the app says so instead of
+switching. With HDMI passthrough, where Android never sees the TV's audio, pick the phone's
+microphone on the TV (next section).
 
 ### Phone and device link
 
@@ -258,16 +261,32 @@ each other (UDP port 21330, no server, no Home Assistant), and
 - **a WLED listed on two devices** is driven by one of them at a time: a device playing music
   wins over a listening one, and between two players the one that started last wins. Strips the
   other device doesn't list are never affected;
+- **a phone's microphone can be another device's audio source**: turn on the phone's *Backup
+  listener*, then on the TV (*Beat & audio → Listen to*, or HA's *Audio source* select) pick
+  *Pixel 8's microphone (Wi-Fi)*. The phone streams its beat to the TV only; the TV's Energy strips,
+  beat pulse and Home Assistant beats follow it, both while the TV plays (passthrough) and while
+  the phone hears music from anything else (then in the last album's colours);
 - **devices in the same room** (*Room*, in the *Other devices* card; default "Home") share the
-  beat and the album colours: a device that can't hear the music itself uses its room-mate's
-  levels. Give the phone another room name to keep it completely separate.
+  album colours, e.g. for a phone's backup listener next to the TV.
 
 **Backup listener** (phones, *Other devices* card): keeps the mic on (with a notification; it sets
-the audio source to Microphone) and, when it hears music for a few seconds, drives *this phone's*
-WLEDs to the beat: in the colours a device in the same room is playing, else the last album's
+the audio source to Microphone), offers the microphone to other devices, and, when it hears music
+for a few seconds, drives *this phone's* WLEDs to the beat: in the colours a device in the same room is playing, else the last album's
 colours. Where it shares a WLED with a device that starts playing, it hands that strip over, and
 it lets go after the stop delay of quiet. Android only lets an app use the mic in the background
 if it was started while on screen, so after a phone reboot, open the app once.
+
+### Beat sync for Home Assistant lights
+
+Any light in Home Assistant can pulse on the beat, not just WLED. Turn on **Beat to Home Assistant
+lights** (app, *Beat & audio*; or the *Beat sync (Home Assistant lights)* switch in HA), then pick
+the lights under *Configure → Beat sync* (empty = every light picked under *Lights*) and a pulse
+strength. On each beat the app sends a tiny `beat` message to the webhook; the integration jumps
+those lights' brightness and fades back to the artwork's brightness. Lights that are off stay off,
+and a beat that arrives while the previous pulse still runs is skipped, so nothing piles up. The
+beat comes from the device's audio source, so a TV using the phone's microphone pulses the TV's
+lights. Fast local lights (Hue, Zigbee, ESPHome, WLED through HA) keep up; Tuya and other cloud
+bulbs lag behind the beat.
 
 ### Home Assistant integration
 
@@ -282,7 +301,7 @@ Installed via HACS (step 4 above). Each TV is one device with:
 | `sensor.<tv>_top_left_colour` … (11) | State = hex colour; attributes `hs`, `rgb`, `brightness`, `raw_hex`, … |
 | `sensor.<tv>_now_playing` | Title or `idle`, with app/artist/album attributes |
 | `binary_sensor.<tv>_playing` | On while music plays |
-| `sensor.<tv>_audio` | What the app listens to: **Device audio**, **Microphone** or **Not listening** |
+| `sensor.<tv>_audio` | What the app listens to: **Device audio**, **Microphone**, **Another device's microphone** (attribute `other_device`) or **Not listening** |
 | `sensor.<tv>_wled_driven_by` | Which device drives the WLED strips (*This device*, another device's name, or *Nobody*); attribute `linked_devices` |
 
 **Control the app from Home Assistant: over Wi-Fi, phones and TVs alike.** The app runs a small
@@ -298,7 +317,8 @@ entity (setup wizard's last step, or *Configure → App control*): that's needed
 | `select.<tv>_colour_source_mode` | **Auto** (album art, screen if none) / **Album art (media access)** / **Screen capture** |
 | `switch.<tv>_screen_capture` | Start / stop screen capture |
 | `switch.<tv>_tv_syncing`, `_beat_pulse` | Pause the whole app; beat pulse for ambient WLED strips |
-| `select.<tv>_audio_source` | What Energy strips and the pulse listen to: **Device audio** / **Microphone** / **Off** |
+| `select.<tv>_audio_source` | What Energy strips, the pulse and beat sync listen to: **Device audio** / **Microphone** / another device's microphone by name / **Off** |
+| `switch.<tv>_beat_sync_home_assistant_lights` | Send beats to HA so the *Beat sync* lights pulse |
 | Configuration: switches | WLED output, restore WLED on stop, restart capture after reboot, MQTT output, device link |
 | Configuration: numbers | Edge / corner size, saturation boost, minimum brightness, screen re-sample interval, stop delay, WLED brightness, pulse strength, Energy sensitivity / blur / background brightness |
 | Configuration: text | **WLED devices** (see [WLED direct](#wled-direct-skips-home-assistant)), **Per-app profiles** |
@@ -356,12 +376,13 @@ The settings screen works with the remote's D-pad. Every setting can also be set
 | WLED brightness | `wled_brightness_pct` | 100 | Scales everything sent to WLED |
 | Restore WLED on stop | `wled_restore` | on | JSON (section / palette) devices |
 | Beat pulse | `pulse`, `pulse_strength` | off, 60 % | Ambient strips, needs audio permission |
-| Audio source | `audio_source` | TV: `output`, phone: `mic` | `output` / `mic` / `off`. One source, never switched automatically |
+| Audio source | `audio_source` | TV: `output`, phone: `mic` | `output` / `mic` / `off` / `peer:<id>` (another device's mic; HA and the app list them by name). Never switched automatically |
+| Beats to Home Assistant | `ha_beats` | off | Each beat goes to the webhook; HA pulses the *Beat sync* lights |
 | Energy sensitivity | `energy_sensitivity` | 100 % | 10–300. Higher = bars reach further |
 | Energy blur | `energy_blur` | 2 | 0–10 smoothing passes across neighbouring LEDs |
 | Energy background | `energy_bg` | 10 % | Brightness of the strip's colour where no bar is |
 | Device link | `link_enabled` | on | Take turns on shared WLEDs; share beat / colours within a room |
-| Room | `room` | `Home` | Only devices in the same room share the beat and colours |
+| Room | `room` | `Home` | Only devices in the same room share album colours |
 | Device name | `device_name` | model | Shown on other devices |
 
 ### ADB cheat sheet
@@ -508,7 +529,7 @@ The app already sends at most one update per track. The rest of the lag is Tuya'
 
 ## Testing
 
-- `./gradlew testReleaseUnitTest`: 76 JVM tests. Colour extraction, payload schema, per-app
+- `./gradlew testReleaseUnitTest`: 77 JVM tests. Colour extraction, payload schema, per-app
   profiles, MQTT packets against a fake broker (connect, auth refusal, retained topics,
   discovery), WLED layout orientation, DNRGB packets, the UDP renderer (fade in, stop, silence
   after stop), the JSON save → set → restore flow against a fake WLED, and beat detection.
@@ -546,6 +567,11 @@ The app already sends at most one update per track. The rest of the lag is Tuya'
   running effect gets switched to solid, "run an effect" sets it (case-insensitive) plus the
   palette select, and "restore" brings back the old effect and palette. A repeated
   `session_start` doesn't overwrite the "before" snapshot.
+- Beat sync was run in Home Assistant 2026.2 with demo lights: picking beat lights switched the
+  app's beat setting on over Wi-Fi; a beat pulsed exactly those lights (up, then back to their
+  brightness) and left an unpicked light and a switched-off one alone; ten beats in half a second
+  didn't pile up. The *Audio source* select showed another device's microphone by name and sent
+  `peer:<id>` when picked.
 - Wi-Fi control from HA was run in Home Assistant 2026.2 against a stand-in for the app's API: an
   entry with no ADB became controllable from the app's first status post, a public control address
   was refused, every control reached the API with the token, *Grant TV permissions* stayed

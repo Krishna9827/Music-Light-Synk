@@ -4,6 +4,21 @@ One version number for the whole project: the TV app (APK) and the Home Assistan
 integration are released together. Every release on GitHub has the APK, the integration zip
 and both blueprints attached.
 
+## v0.8.0
+
+- **Use another device's microphone**: a phone with its Backup listener on offers its microphone
+  on the Wi-Fi, and the TV (or any device) can pick it by name as its audio source, in the app
+  (*Beat & audio → Listen to*) or in Home Assistant (*Audio source*). For TVs with HDMI passthrough,
+  where Android never hears the audio. The TV's Energy strips and beat pulse follow the phone's mic,
+  also when the music comes from something else (then in the last album's colours). This replaces
+  v0.7's automatic same-room beat sharing; rooms now only share album colours.
+- **Beat sync for Home Assistant lights**: with *Beat to Home Assistant lights* on, every beat goes
+  to the webhook and the integration pulses the lights picked under *Configure → Beat sync*
+  (brightness up, back to the artwork's brightness). Lights that are off stay off; beats never pile
+  up. New *Beat sync (Home Assistant lights)* switch; picking beat lights switches it on.
+- Home Assistant's *Audio source* select lists the choices the app offers, including other
+  devices' microphones by name; the *Audio* sensor shows when another device's mic is used.
+
 ## v0.7.0
 
 **Fixes from testing v0.6**

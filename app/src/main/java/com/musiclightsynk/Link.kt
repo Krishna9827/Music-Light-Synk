@@ -21,8 +21,9 @@ import kotlin.math.roundToInt
  * devices meet:
  *  - two devices that list the same WLED take turns on it (claims are per WLED host), so a phone
  *    in the bedroom never gives way to the TV in the living room;
- *  - devices in the same room (a name set in the app) share the beat and the album colours, so a
- *    phone's mic can feed a TV that can't hear its own audio.
+ *  - a device can pick another device's microphone as its audio source (e.g. the TV uses the
+ *    phone's mic when it can't hear its own audio): the phone then streams its beat to it;
+ *  - devices in the same room (a name set in the app) share the album colours.
  *
  * Pure JVM code (no Android classes); unit tested.
  */
@@ -36,13 +37,19 @@ object LinkProtocol {
         abstract val from: String
     }
 
-    /** "I'm here." [platform] e.g. "tv" / "phone"; [room] scopes sharing; [listening] = backup mic is on. */
+    /**
+     * "I'm here." [platform] e.g. "tv" / "phone"; [room] scopes colour sharing; [listening] = backup
+     * listener on; [mic] = its microphone is on and can be used by other devices; [src] = id of
+     * the device whose microphone this one listens to ("" = none): that device streams to it.
+     */
     data class Hi(
         override val from: String,
         val name: String,
         val platform: String,
         val room: String = "",
         val listening: Boolean = false,
+        val mic: Boolean = false,
+        val src: String = "",
     ) : Msg()
 
     /** What this device plays: raw colours per slot. Sent on each change and every few seconds while playing. */
@@ -61,6 +68,7 @@ object LinkProtocol {
         val o = JSONObject().put("v", VERSION).put("g", GROUP).put("id", m.from)
         when (m) {
             is Hi -> o.put("t", "hi").put("name", m.name).put("plat", m.platform).put("room", m.room).put("listen", m.listening)
+                .put("mic", m.mic).put("src", m.src)
             is Pal -> {
                 val cols = JSONObject()
                 for ((slot, c) in m.colors) cols.put(slot.key, c.hex)
@@ -85,7 +93,10 @@ object LinkProtocol {
             null
         } else {
             when (o.optString("t")) {
-                "hi" -> Hi(id, o.optString("name", id), o.optString("plat"), o.optString("room"), o.optBoolean("listen"))
+                "hi" -> Hi(
+                    id, o.optString("name", id), o.optString("plat"), o.optString("room"), o.optBoolean("listen"),
+                    o.optBoolean("mic"), o.optString("src"),
+                )
                 "pal" -> {
                     val cols = o.getJSONObject("pal")
                     val map = LinkedHashMap<Slot, Rgb>()
@@ -221,6 +232,14 @@ class Link(
         /** Null until its first "hi". */
         @Volatile
         var room: String? = null
+
+        /** Its microphone is on and others may listen to it. */
+        @Volatile
+        var mic = false
+
+        /** Id of the device whose microphone it listens to ("" = none). */
+        @Volatile
+        var src = ""
     }
 
     private var socket: DatagramSocket? = null
@@ -310,6 +329,8 @@ class Link(
                 p.platform = m.platform
                 p.listening = m.listening
                 p.room = m.room
+                p.mic = m.mic
+                p.src = m.src
             }
             try {
                 onMessage(m)

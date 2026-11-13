@@ -15,6 +15,8 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_ADB_ENTITY,
+    CONF_BEAT_LIGHTS,
+    CONF_BEAT_STRENGTH,
     CONF_BRIGHTNESS_MODE,
     CONF_EFFECT_MODE,
     CONF_EFFECT_NAME,
@@ -94,12 +96,19 @@ def _options_schema(opts: dict[str, Any]) -> vol.Schema:
     stop = vol.Schema(
         {vol.Required(CONF_ON_STOP, default=opts[CONF_ON_STOP]): _select(["restore", "off", "nothing"], CONF_ON_STOP)}
     )
+    beat = vol.Schema(
+        {
+            vol.Optional(CONF_BEAT_LIGHTS, description={"suggested_value": opts[CONF_BEAT_LIGHTS]}): LIGHT_SELECTOR,
+            vol.Required(CONF_BEAT_STRENGTH, default=opts[CONF_BEAT_STRENGTH]): _percent(),
+        }
+    )
     return vol.Schema(
         {
             vol.Required("lights"): section(_lights_schema(opts), {"collapsed": False}),
             vol.Required("brightness"): section(brightness, {"collapsed": True}),
             vol.Required("effects"): section(effects, {"collapsed": True}),
             vol.Required("stop"): section(stop, {"collapsed": True}),
+            vol.Required("beat"): section(beat, {"collapsed": True}),
             vol.Required("tv"): section(_tv_schema(opts), {"collapsed": True}),
         }
     )
@@ -179,6 +188,7 @@ class MusicLightSynkOptionsFlow(OptionsFlow):
                     flat.update(value)
             # A cleared ADB picker is omitted from the input: make that "no TV control".
             flat.setdefault(CONF_ADB_ENTITY, None)
+            flat.setdefault(CONF_BEAT_LIGHTS, [])
             return self.async_create_entry(data={**DEFAULT_OPTIONS, **flat})
         opts = {**DEFAULT_OPTIONS, **self.config_entry.options}
         return self.async_show_form(step_id="init", data_schema=_options_schema(opts))

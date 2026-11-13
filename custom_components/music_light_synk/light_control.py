@@ -3,6 +3,10 @@
 Same behaviour as the blueprint, without needing one: every zone is updated in parallel,
 running effects are switched to solid (or to a chosen effect), and when the music stops the
 lights are restored to how they were before it started (or turned off).
+
+Beat sync: with the app's "Beat to Home Assistant lights" on, every beat pulses the chosen lights
+(brightness up, then back to the artwork brightness). A beat arriving while the previous pulse is
+still running is skipped, so slow lights never build up a backlog.
 """
 
 from __future__ import annotations
@@ -20,11 +24,13 @@ from homeassistant.components.light import (
     ATTR_TRANSITION,
     DOMAIN as LIGHT_DOMAIN,
 )
-from homeassistant.const import ATTR_ENTITY_ID, STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.const import ATTR_ENTITY_ID, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers.state import async_reproduce_state
 
 from .const import (
+    CONF_BEAT_LIGHTS,
+    CONF_BEAT_STRENGTH,
     CONF_BRIGHTNESS_MODE,
     CONF_EFFECT_MODE,
     CONF_EFFECT_NAME,
@@ -44,6 +50,8 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 TEST_SECONDS = 6
+PULSE_HOLD_SECONDS = 0.12
+PULSE_FALL_SECONDS = 0.25
 
 
 class LightController:
@@ -55,6 +63,9 @@ class LightController:
         self.enabled = True
         self._task: asyncio.Task | None = None
         self._snapshot: list[State] | None = None
+        self._beat_task: asyncio.Task | None = None
+        # Brightness we last gave each light (what a beat pulse returns to).
+        self._levels: dict[str, int] = {}
 
     # ---- configuration ------------------------------------------------------------------
 
@@ -84,6 +95,25 @@ class LightController:
             self._start(self.async_stop())
         elif event in ("colors", "test"):
             self._start(self.async_apply(payload.get("colors"), bool(payload.get("session_start"))))
+
+    def beat_lights(self) -> list[str]:
+        """Lights that pulse on the beat: the ones picked for it, else every mapped light."""
+        return list(self.options.get(CONF_BEAT_LIGHTS) or []) or self.all_lights()
+
+    def beat(self, payload: Mapping[str, Any]) -> None:
+        """A beat from the app. Skipped while the previous pulse still runs."""
+        if not self.enabled or (self._beat_task is not None and not self._beat_task.done()):
+            return
+        lights = self.beat_lights()
+        if not lights:
+            return
+        try:
+            level = min(1.0, max(0.0, float(payload.get("level", 1.0))))
+        except (TypeError, ValueError):
+            level = 1.0
+        self._beat_task = self.hass.async_create_background_task(
+            self._guard(self.async_pulse(lights, level)), "music_light_synk_beat"
+        )
 
     def test(self) -> None:
         """Show the rainbow test pattern for a few seconds, then put the lights back."""
@@ -141,11 +171,39 @@ class LightController:
             }
             if transition > 0:
                 data[ATTR_TRANSITION] = transition
+            for entity_id in ents:
+                self._levels[entity_id] = data[ATTR_BRIGHTNESS]
             calls.append(self._call(LIGHT_DOMAIN, "turn_on", data))
         # All zones at once: with cloud bulbs, sequential calls add up to visible lag.
         await asyncio.gather(*calls)
 
+    async def async_pulse(self, lights: list[str], level: float) -> None:
+        """One beat: lights that are on jump in brightness, then fall back to their colour's brightness."""
+        strength = float(self.options[CONF_BEAT_STRENGTH]) / 100 * (0.6 + 0.4 * level)
+        jump = max(25, round(255 * strength))
+        plan: dict[tuple[int, int], list[str]] = {}
+        for entity_id in lights:
+            state = self.hass.states.get(entity_id)
+            if state is None or state.state != STATE_ON:
+                continue  # never switch a light on just for a beat
+            base = self._levels.get(entity_id) or int(state.attributes.get(ATTR_BRIGHTNESS) or 128)
+            # Up as far as there's room; only lights already near full dip instead, so the beat still shows.
+            peak = min(255, base + jump) if 255 - base >= max(25, jump // 2) else max(1, base - jump)
+            plan.setdefault((peak, base), []).append(entity_id)
+        if not plan:
+            return
+        await asyncio.gather(
+            *(self._call(LIGHT_DOMAIN, "turn_on", {ATTR_ENTITY_ID: ents, ATTR_BRIGHTNESS: peak, ATTR_TRANSITION: 0})
+              for (peak, _), ents in plan.items())
+        )
+        await asyncio.sleep(PULSE_HOLD_SECONDS)
+        await asyncio.gather(
+            *(self._call(LIGHT_DOMAIN, "turn_on", {ATTR_ENTITY_ID: ents, ATTR_BRIGHTNESS: base, ATTR_TRANSITION: PULSE_FALL_SECONDS})
+              for (_, base), ents in plan.items())
+        )
+
     async def async_stop(self) -> None:
+        self._levels.clear()
         opts = self.options
         if opts[CONF_ON_STOP] == "restore":
             if self._snapshot:

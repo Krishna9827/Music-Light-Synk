@@ -19,7 +19,8 @@ class LinkTest {
     fun everyMessageRoundTrips() {
         val p = ColorExtractor.testPalette()
         val msgs = listOf(
-            LinkProtocol.Hi("tv1", "Fire TV", "tv", room = "Living room", listening = false),
+            LinkProtocol.Hi("tv1", "Fire TV", "tv", room = "Living room", listening = false, src = "ph1"),
+            LinkProtocol.Hi("ph1", "Pixel 8", "phone", listening = true, mic = true),
             LinkProtocol.Pal("tv1", LinkProtocol.colorsOf(p), playing = true, title = "Song - Artist"),
             LinkProtocol.Nrg("ph1", AudioLevels(0.5f, 0.25f, 0.125f, beat = true)),
             LinkProtocol.Claim("ph1", LightHub.PRIO_LISTENING, 12_345, setOf("192.168.1.60", "192.168.1.61")),
@@ -180,6 +181,15 @@ class LinkTest {
             val nrg = atTv.poll(2, TimeUnit.SECONDS) as LinkProtocol.Nrg
             assertEquals(0.7f, nrg.levels.lows, 0.001f)
             assertTrue(nrg.levels.beat)
+            // the TV picks the phone's microphone: the phone streams only to devices that did
+            tv.broadcastTargets = listOf(InetSocketAddress(lo, portPhone))
+            tv.broadcast(LinkProtocol.Hi("tv", "Fire TV", "tv", src = "phone"))
+            atPhone.poll(2, TimeUnit.SECONDS)
+            assertEquals("phone", phone.peers().single().src)
+            phone.sendToPeers(LinkProtocol.Nrg("phone", AudioLevels(0.3f, 0f, 0f))) { it.src == "phone" }
+            assertTrue(atTv.poll(2, TimeUnit.SECONDS) is LinkProtocol.Nrg)
+            phone.sendToPeers(LinkProtocol.Nrg("phone", AudioLevels(0.3f, 0f, 0f))) { it.src == "someone-else" }
+            assertNull("not streamed to a device that didn't pick this mic", atTv.poll(300, TimeUnit.MILLISECONDS))
             // and the TV learnt the phone from that packet
             tv.sendToPeers(LinkProtocol.Claim("tv", LightHub.PRIO_PLAYING, 1000, tvStrips))
             assertEquals(LightHub.PRIO_PLAYING, (atPhone.poll(2, TimeUnit.SECONDS) as LinkProtocol.Claim).prio)
