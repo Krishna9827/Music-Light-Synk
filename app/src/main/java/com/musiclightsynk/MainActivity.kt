@@ -32,8 +32,9 @@ import android.widget.Toast
 import kotlin.math.roundToInt
 
 /**
- * TV-friendly settings + status screen, built in code (no XML) and fully D-pad navigable.
- * Everything here can also be set over ADB ([AdbCommandReceiver]) or from Home Assistant.
+ * Settings + status screen for TV (D-pad navigable, overscan-safe) and phones (one column,
+ * tighter spacing), built in code (no XML). Everything here can also be set over ADB
+ * ([AdbCommandReceiver]) or from Home Assistant.
  */
 class MainActivity : Activity() {
 
@@ -42,6 +43,9 @@ class MainActivity : Activity() {
     private lateinit var captureChip: TextView
     private lateinit var haChip: TextView
     private lateinit var wledChip: TextView
+    private lateinit var linkChip: TextView
+    private lateinit var hearingStatus: TextView
+    private lateinit var linkStatus: TextView
     private lateinit var nowTitle: TextView
     private lateinit var nowApp: TextView
     private lateinit var resultStatus: TextView
@@ -66,6 +70,7 @@ class MainActivity : Activity() {
     private val fg = Color.parseColor("#ECEDEF")
     private val muted = Color.parseColor("#9AA0A6")
     private val accent = Color.parseColor("#FFB300")
+    private val isTv by lazy { packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -78,6 +83,10 @@ class MainActivity : Activity() {
         super.onResume()
         SyncEngine.addListener(refresher)
         MediaListenerService.requestRebindIfNeeded(this)
+        // The backup listener may only start while the app is on screen (Android rule for the mic).
+        if (prefs.listenerEnabled && !ListenerService.running && ListenerService.hasMicPermission(this)) {
+            ListenerService.start(this)
+        }
         renderWledDevices()
         refreshStatus()
     }
@@ -92,7 +101,10 @@ class MainActivity : Activity() {
 
     private fun buildUi(): View {
         val wide = resources.configuration.screenWidthDp >= 720
-        val page = column().apply { setPadding(dp(48), dp(24), dp(48), dp(32)) } // TV overscan-safe
+        val page = column().apply {
+            // TV: overscan-safe margins. Phone: use the width.
+            if (isTv) setPadding(dp(48), dp(24), dp(48), dp(32)) else setPadding(dp(12), dp(14), dp(12), dp(24))
+        }
         page.addView(headerRow())
 
         val columns = LinearLayout(this).apply { orientation = if (wide) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL }
@@ -126,6 +138,7 @@ class MainActivity : Activity() {
             captureChip = chip().also { addView(it) }
             haChip = chip().also { addView(it) }
             wledChip = chip().also { addView(it) }
+            linkChip = chip().also { addView(it) }
             val r = row()
             accessButton = button("Grant media access") { openListenerSettings() }
             captureButton = button("Start screen capture") { toggleCapture() }
@@ -135,6 +148,52 @@ class MainActivity : Activity() {
         }
 
         // ---- right: settings
+        cardOf(right, "WLED devices", "Each WLED shows its own part of the artwork, or bounces with the music (Energy). Talks to WLED directly.").apply {
+            wledList = column()
+            addView(wledList)
+            addView(addWledRow())
+            addView(toggleButton({ "WLED output: " + onOff(prefs.wledEnabled) }) { prefs.wledEnabled = !prefs.wledEnabled }, fullWidth())
+            stepper(this, "WLED brightness", "%", 10, 10..100, { prefs.wledBrightnessPct }, { prefs.wledBrightnessPct = it })
+            addView(toggleButton({ "Restore WLED when music stops: " + onOff(prefs.wledRestore) }) {
+                prefs.wledRestore = !prefs.wledRestore
+            }, fullWidth())
+        }
+
+        cardOf(
+            right, "Beat & audio",
+            "Energy bars and the beat pulse listen to the music. Device audio works on Fire TV unless HDMI passthrough (Dolby/DTS to a soundbar) is on.",
+        ).apply {
+            hearingStatus = text("", 13f, muted).also { addView(it) }
+            addView(toggleButton({ "Listen to: ${prefs.audioSource.label}" }) {
+                prefs.audioSource = prefs.audioSource.next()
+                if (prefs.audioSource != AudioSource.OFF) ensureAudioPermission()
+            }, fullWidth())
+            stepper(this, "Sensitivity", "%", 10, Prefs.SENSITIVITY_RANGE, { prefs.energySensitivityPct }, { prefs.energySensitivityPct = it })
+            stepper(this, "Blur", "", 1, Prefs.BLUR_RANGE, { prefs.energyBlur }, { prefs.energyBlur = it })
+            stepper(this, "Background brightness", "%", 5, Prefs.ENERGY_BG_RANGE, { prefs.energyBackgroundPct }, { prefs.energyBackgroundPct = it })
+            addView(toggleButton({ "Beat pulse (gradient strips): " + onOff(prefs.pulseEnabled) }) {
+                prefs.pulseEnabled = !prefs.pulseEnabled
+                if (prefs.pulseEnabled) ensureAudioPermission()
+            }, fullWidth())
+            stepper(this, "Pulse strength", "%", 10, 10..100, { prefs.pulseStrengthPct }, { prefs.pulseStrengthPct = it })
+        }
+
+        cardOf(right, "Other devices", "The app on your TV and phone share colours and the beat over Wi-Fi, and take turns driving the WLED strips.").apply {
+            linkStatus = text("", 13f, muted).also { addView(it) }
+            addView(toggleButton({ "Device link: " + onOff(prefs.linkEnabled) }) { prefs.linkEnabled = !prefs.linkEnabled }, fullWidth())
+            field(this, "This device's name", android.os.Build.MODEL ?: "",
+                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS, { prefs.deviceName }, { prefs.deviceName = it })
+            if (ListenerService.isSupported(this@MainActivity)) {
+                addView(text(
+                    "Backup listener: this phone's mic hears music played elsewhere (iPhone, PC, ...) and drives the strips to the " +
+                        "beat, in the last album's colours. It gives way whenever a device playing music takes over.",
+                    12f, muted,
+                ))
+                addView(toggleButton({ "Backup listener (mic): " + onOff(prefs.listenerEnabled) }) { toggleListener() }, fullWidth())
+            }
+            addView(button("Save name", primary = true) { saveFields(silent = false) }, fullWidth())
+        }
+
         cardOf(right, "Home Assistant").apply {
             field(this, "Home Assistant URL", "http://192.168.1.10:8123",
                 InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI,
@@ -146,22 +205,6 @@ class MainActivity : Activity() {
                 InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD,
                 { prefs.token }, { prefs.token = it })
             addView(button("Save", primary = true) { saveFields(silent = false) }, fullWidth())
-        }
-
-        cardOf(right, "WLED devices", "Each WLED shows its own part of the artwork. Talks to WLED directly, instant.").apply {
-            wledList = column()
-            addView(wledList)
-            addView(addWledRow())
-            addView(toggleButton({ "WLED output: " + onOff(prefs.wledEnabled) }) { prefs.wledEnabled = !prefs.wledEnabled }, fullWidth())
-            stepper(this, "WLED brightness", "%", 10, 10..100, { prefs.wledBrightnessPct }, { prefs.wledBrightnessPct = it })
-            addView(toggleButton({ "Restore WLED when music stops: " + onOff(prefs.wledRestore) }) {
-                prefs.wledRestore = !prefs.wledRestore
-            }, fullWidth())
-            addView(toggleButton({ "Beat pulse (ambient strips): " + onOff(prefs.pulseEnabled) }) {
-                prefs.pulseEnabled = !prefs.pulseEnabled
-                if (prefs.pulseEnabled) ensureAudioPermission()
-            }, fullWidth())
-            stepper(this, "Pulse strength", "%", 10, 10..100, { prefs.pulseStrengthPct }, { prefs.pulseStrengthPct = it })
         }
 
         cardOf(right, "Colour source & tuning").apply {
@@ -177,7 +220,7 @@ class MainActivity : Activity() {
             }, fullWidth())
         }
 
-        cardOf(right, "MQTT (optional)").apply {
+        cardOf(right, "MQTT (optional)", collapsible = true).apply {
             addView(toggleButton({ "MQTT: " + onOff(prefs.mqttEnabled) }) { prefs.mqttEnabled = !prefs.mqttEnabled }, fullWidth())
             field(this, "Broker host / IP", "192.168.1.10", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI,
                 { prefs.mqttHost }, { prefs.mqttHost = it })
@@ -195,7 +238,7 @@ class MainActivity : Activity() {
             addView(button("Save MQTT", primary = true) { saveFields(silent = false) }, fullWidth())
         }
 
-        cardOf(right, "Set up from a computer or Home Assistant").apply {
+        cardOf(right, "Set up from a computer or Home Assistant", collapsible = true).apply {
             addView(text(ADB_HELP, 12f, muted).apply { typeface = Typeface.MONOSPACE })
         }
 
@@ -255,7 +298,10 @@ class MainActivity : Activity() {
         return r
     }
 
-    /** One row per device: host, zone (cycles), zone options, remove. Rebuilt after every change. */
+    /**
+     * One block per device: host + remove; zone (press to cycle) + zone option; Energy / Flip /
+     * Mirror. Rebuilt after every change. Focus roles: 1 zone, 2 zone option, 3 energy, 4 flip, 5 mirror.
+     */
     private fun renderWledDevices(focusIndex: Int = -1, focusRole: Int = 0) {
         if (!::wledList.isInitialized) return
         wledList.removeAllViews()
@@ -265,32 +311,74 @@ class MainActivity : Activity() {
             return
         }
         devices.forEachIndexed { i, d ->
-            val r = row().apply {
-                setPadding(dp(10), dp(6), dp(6), dp(6))
-                background = rounded(Color.parseColor("#1F2228"), 10)
+            val block = column().apply {
+                setPadding(dp(10), dp(8), dp(10), dp(8))
+                background = rounded(Color.parseColor("#1F2228"), 12)
             }
-            r.addView(text(d.host, 14f, fg, bold = true), LinearLayout.LayoutParams(0, WRAP_CONTENT, 0.9f))
+            val top = row()
+            top.addView(text(d.host, 15f, fg, bold = true), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            top.addView(button("Remove") {
+                prefs.setWledDevices(prefs.wledDevices.filterIndexed { j, _ -> j != i })
+                renderWledDevices(focusIndex = (i - 1).coerceAtLeast(0), focusRole = 1)
+                settingsTouched()
+            }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+            block.addView(top)
+
+            val zoneRow = row()
             val zoneBtn = button(d.zone.label) { updateDevice(i, 1) { it.copy(zone = WledDevices.nextZone(it.zone)) } }
-            r.addView(zoneBtn, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1.6f).apply { marginEnd = dp(6) })
+            zoneRow.addView(zoneBtn, weighted(1.6f))
             val extra: Button? = when (val z = d.zone) {
                 is WledZone.Ambient -> button("Layout") { editLayout(i, z) }
-                is WledZone.Section -> button(if (z.keepEffect) "Keep effect" else "Solid") {
+                is WledZone.Section -> if (d.effect.energy) null else button(if (z.keepEffect) "Keep effect" else "Solid") {
                     updateDevice(i, 2) { it.copy(zone = z.copy(keepEffect = !z.keepEffect)) }
                 }
                 is WledZone.Palette -> null
             }
-            if (extra != null) r.addView(extra, LinearLayout.LayoutParams(dp(130), WRAP_CONTENT).apply { marginEnd = dp(6) })
-            r.addView(button("Remove") {
-                prefs.setWledDevices(prefs.wledDevices.filterIndexed { j, _ -> j != i })
-                renderWledDevices(focusIndex = (i - 1).coerceAtLeast(0), focusRole = 1)
-                settingsTouched()
-            }, LinearLayout.LayoutParams(dp(110), WRAP_CONTENT))
-            wledList.addView(r, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(6) })
+            if (extra != null) zoneRow.addView(extra, weighted(1f))
+            block.addView(zoneRow)
+
+            val roles = HashMap<Int, Button>()
+            roles[1] = zoneBtn
+            if (extra != null) roles[2] = extra
+            if (d.zone !is WledZone.Palette) {
+                val fx = row()
+                val e = d.effect
+                val energyBtn = button("Energy: " + onOff(e.energy), primary = e.energy) {
+                    if (!e.energy) ensureAudioPermission()
+                    updateDevice(i, 3) { it.copy(effect = it.effect.copy(energy = !it.effect.energy)) }
+                }
+                val flipBtn = button("Flip: " + onOff(e.flip)) { updateDevice(i, 4) { it.copy(effect = it.effect.copy(flip = !it.effect.flip)) } }
+                val mirrorBtn = button("Mirror: " + onOff(e.mirror)) {
+                    updateDevice(i, 5) { it.copy(effect = it.effect.copy(mirror = !it.effect.mirror)) }
+                }
+                flipBtn.isEnabled = e.energy
+                mirrorBtn.isEnabled = e.energy
+                fx.addView(energyBtn, weighted(1.2f))
+                fx.addView(flipBtn, weighted(1f))
+                fx.addView(mirrorBtn, weighted(1f))
+                block.addView(fx)
+                roles[3] = energyBtn
+                roles[4] = flipBtn
+                roles[5] = mirrorBtn
+                if (e.energy) block.addView(text(energyHint(d), 12f, muted))
+            }
+            wledList.addView(block, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(8) })
             if (i == focusIndex) {
-                val target = if (focusRole == 2 && extra != null) extra else zoneBtn
+                val target = roles[focusRole]?.takeIf { it.isEnabled } ?: zoneBtn
                 target.post { target.requestFocus() }
             }
         }
+    }
+
+    private fun energyHint(d: WledDevice): String {
+        val from = when {
+            d.effect.mirror && d.effect.flip -> "from both ends inward"
+            d.effect.mirror -> "from the middle outward"
+            d.effect.flip -> "from the last LED"
+            else -> "from LED 0"
+        }
+        val colours = if (d.zone is WledZone.Ambient) "in the gradient's colours" else "lows / mids / highs in album colours"
+        return "Bars bounce $from, $colours. Same switches as LedFx."
     }
 
     private fun updateDevice(index: Int, focusRole: Int, change: (WledDevice) -> WledDevice) {
@@ -352,7 +440,7 @@ class MainActivity : Activity() {
 
     private fun fullWidth() = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(6) }
 
-    private fun weighted() = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+    private fun weighted(weight: Float = 1f) = LinearLayout.LayoutParams(0, WRAP_CONTENT, weight).apply {
         marginEnd = dp(6)
         topMargin = dp(6)
     }
@@ -363,16 +451,33 @@ class MainActivity : Activity() {
         if (strokeColor != null) setStroke(dp(strokeDp), strokeColor)
     }
 
-    /** A titled card; returns the container to add content to. */
-    private fun cardOf(parent: LinearLayout, title: String, subtitle: String? = null): LinearLayout {
+    /**
+     * A titled card; returns the container to add content to. A [collapsible] card starts
+     * folded: its title is a button that shows / hides the content.
+     */
+    private fun cardOf(parent: LinearLayout, title: String, subtitle: String? = null, collapsible: Boolean = false): LinearLayout {
         val c = column().apply {
             background = rounded(card, 16, cardEdge)
-            setPadding(dp(18), dp(14), dp(18), dp(16))
+            if (isTv) setPadding(dp(18), dp(14), dp(18), dp(16)) else setPadding(dp(14), dp(12), dp(14), dp(14))
         }
-        c.addView(text(title.uppercase(), 13f, accent, bold = true).apply { letterSpacing = 0.08f })
-        if (subtitle != null) c.addView(text(subtitle, 12f, muted))
-        parent.addView(c, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(16) })
-        return c
+        parent.addView(c, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(if (isTv) 16 else 12) })
+        if (!collapsible) {
+            c.addView(text(title.uppercase(), 13f, accent, bold = true).apply { letterSpacing = 0.08f })
+            if (subtitle != null) c.addView(text(subtitle, 12f, muted))
+            return c
+        }
+        val body = column().apply { visibility = View.GONE }
+        val header = button("▸  $title") {}
+        header.setOnClickListener {
+            val open = body.visibility != View.VISIBLE
+            body.visibility = if (open) View.VISIBLE else View.GONE
+            header.text = (if (open) "▾  " else "▸  ") + title
+        }
+        header.gravity = Gravity.START or Gravity.CENTER_VERTICAL
+        c.addView(header, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        if (subtitle != null) body.addView(text(subtitle, 12f, muted))
+        c.addView(body)
+        return body
     }
 
     private fun text(s: String, sizeSp: Float, color: Int, bold: Boolean = false) = TextView(this).apply {
@@ -577,6 +682,23 @@ class MainActivity : Activity() {
         })
 
         val s = SyncEngine.status
+        setChip(linkChip, if (!prefs.linkEnabled) null else s.peers.isNotEmpty(), when {
+            !prefs.linkEnabled -> "Device link: off"
+            s.peers.isEmpty() -> "Other devices: none found yet"
+            else -> "Other devices: " + s.peers.joinToString(", ")
+        })
+        hearingStatus.text = when (s.audio) {
+            AudioEngine.SRC_OUTPUT -> "Hearing: device audio"
+            AudioEngine.SRC_MIC -> "Hearing: microphone"
+            else -> "Not listening right now. Starts when music plays and an Energy / pulse strip or another device needs it."
+        }
+        linkStatus.text = if (!prefs.linkEnabled) {
+            "Link is off: this device works on its own."
+        } else {
+            "Found: " + s.peers.joinToString(", ").ifEmpty { "no other devices yet" } +
+                "\nWLED strips driven by: " + (s.renderer ?: "nobody right now") +
+                if (s.listening) "\nBackup listener is on" else ""
+        }
         val parts = s.nowPlaying.split(": ", limit = 2)
         nowApp.text = if (parts.size == 2) parts[0] else ""
         nowTitle.text = if (parts.size == 2) parts[1] else s.nowPlaying
@@ -606,19 +728,37 @@ class MainActivity : Activity() {
         settingsTouched()
     }
 
-    private fun ensureAudioPermission() {
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 7)
+    /** Ask for the mic / audio permission (and, for the listener's notification, notifications). */
+    private fun ensureAudioPermission(forListener: Boolean = false) {
+        val want = ArrayList<String>()
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) want += Manifest.permission.RECORD_AUDIO
+        if (forListener && android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            want += Manifest.permission.POST_NOTIFICATIONS
         }
+        if (want.isNotEmpty()) requestPermissions(want.toTypedArray(), 7)
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == 7) {
-            val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
-            toast(if (granted) "Audio access granted - beat pulse ready" else "Beat pulse needs audio access")
+            val granted = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            toast(if (granted) "Audio access granted: Energy and the beat pulse can hear the music" else "Energy and the beat pulse need audio access")
+            if (granted && prefs.listenerEnabled) ListenerService.start(this)
             settingsTouched()
         }
+    }
+
+    private fun toggleListener() {
+        prefs.listenerEnabled = !prefs.listenerEnabled
+        if (!prefs.listenerEnabled) {
+            ListenerService.stop(this)
+            return
+        }
+        val hadMic = ListenerService.hasMicPermission(this)
+        ensureAudioPermission(forListener = true) // without the mic permission it starts in onRequestPermissionsResult
+        if (hadMic && !ListenerService.start(this)) toast("Could not start the backup listener")
     }
 
     private fun toggleCapture() {

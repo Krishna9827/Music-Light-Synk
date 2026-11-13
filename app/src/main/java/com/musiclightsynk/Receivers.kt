@@ -11,6 +11,8 @@ class BootReceiver : BroadcastReceiver() {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
         MediaListenerService.requestRebindIfNeeded(context)
         val p = Prefs(context)
+        // Phone backup listener: allowed after boot on older Android; newer versions need the app opened once.
+        if (p.listenerEnabled) ListenerService.start(context)
         if (p.enabled && p.bootCapture && p.sourceMode != SourceMode.ARTWORK && !ScreenCaptureService.isRunning) {
             try {
                 // Allowed from the background once SYSTEM_ALERT_WINDOW is granted via appops (setup script).
@@ -118,6 +120,12 @@ class AdbCommandReceiver : BroadcastReceiver() {
         Opt("wled_restore", 'b') { p, v -> p.wledRestore = v as Boolean; "${p.wledRestore}" },
         Opt("pulse", 'b') { p, v -> p.pulseEnabled = v as Boolean; "${p.pulseEnabled}" },
         Opt("pulse_strength", 'i') { p, v -> p.pulseStrengthPct = v as Int; "${p.pulseStrengthPct}" },
+        Opt("audio_source", 's') { p, v -> p.audioSource = AudioSource.of(v as String); p.audioSource.key },
+        Opt("energy_sensitivity", 'i') { p, v -> p.energySensitivityPct = v as Int; "${p.energySensitivityPct}" },
+        Opt("energy_blur", 'i') { p, v -> p.energyBlur = v as Int; "${p.energyBlur}" },
+        Opt("energy_bg", 'i') { p, v -> p.energyBackgroundPct = v as Int; "${p.energyBackgroundPct}" },
+        Opt("link_enabled", 'b') { p, v -> p.linkEnabled = v as Boolean; "${p.linkEnabled}" },
+        Opt("device_name", 's') { p, v -> p.deviceName = v as String; p.deviceName.ifEmpty { "(model name)" } },
     )
 
     private fun configure(ctx: Context, i: Intent): String {
@@ -166,6 +174,9 @@ class AdbCommandReceiver : BroadcastReceiver() {
             "mqtt=" + if (p.isMqttConfigured) "${p.mqttHost}:${p.mqttPort} ${p.mqttTopic}" else "off",
             "wled=" + if (p.isWledConfigured) p.wledDevicesRaw else "off",
             "pulse=" + p.pulseEnabled,
+            "audio=" + p.audioSource.key + " (" + (s.audio ?: "not listening") + ")",
+            "link=" + if (!p.linkEnabled) "off" else s.peers.joinToString(",").ifEmpty { "no other devices" },
+            "wled_driver=" + (s.renderer ?: "-"),
             "enabled=" + p.enabled,
             "now=" + s.nowPlaying,
             "last=" + s.lastResult,

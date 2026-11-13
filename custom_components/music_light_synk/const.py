@@ -99,6 +99,9 @@ APP_LISTENER = f"{APP_PACKAGE}/{APP_PACKAGE}.MediaListenerService"
 
 SOURCE_MODES = ["auto", "artwork", "screen"]
 
+# Where Energy strips / beat pulse get their audio: device output, microphone, or off.
+AUDIO_SOURCES = ["auto", "output", "mic", "off"]
+
 
 @dataclass(frozen=True)
 class AppSetting:
@@ -121,6 +124,7 @@ APP_SWITCHES: list[AppSetting] = [
     AppSetting("wled_restore", "Restore WLED when music stops", "mdi:restore"),
     AppSetting("boot_capture", "Restart screen capture after reboot", "mdi:restart"),
     AppSetting("mqtt_enabled", "MQTT output", "mdi:lan-connect"),
+    AppSetting("link_enabled", "Device link", "mdi:access-point-network"),
 ]
 
 APP_NUMBERS: list[AppSetting] = [
@@ -131,6 +135,9 @@ APP_NUMBERS: list[AppSetting] = [
     AppSetting("stop_delay", "Send 'stopped' after a pause of", "mdi:timer-pause-outline", 0, 300, 5, "s"),
     AppSetting("wled_brightness_pct", "WLED brightness", "mdi:brightness-6", 10, 100, 5, "%"),
     AppSetting("pulse_strength", "Pulse strength", "mdi:waveform", 10, 100, 5, "%"),
+    AppSetting("energy_sensitivity", "Energy sensitivity", "mdi:equalizer", 10, 300, 10, "%"),
+    AppSetting("energy_blur", "Energy blur", "mdi:blur", 0, 10, 1),
+    AppSetting("energy_bg", "Energy background brightness", "mdi:brightness-5", 0, 100, 5, "%"),
 ]
 
 APP_TEXTS: list[AppSetting] = [

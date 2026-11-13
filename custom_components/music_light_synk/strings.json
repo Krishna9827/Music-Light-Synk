@@ -151,6 +151,13 @@
           "test": "Test pattern",
           "none": "Nothing yet"
         }
+      },
+      "audio": {
+        "state": {
+          "output": "Device audio",
+          "mic": "Microphone",
+          "none": "Not listening"
+        }
       }
     },
     "select": {
@@ -159,6 +166,14 @@
           "auto": "Auto: album art, screen if no art",
           "artwork": "Album art (media access)",
           "screen": "Screen capture"
+        }
+      },
+      "audio_source": {
+        "state": {
+          "auto": "Auto: device audio, else microphone",
+          "output": "Device audio",
+          "mic": "Microphone",
+          "off": "Off"
         }
       }
     }

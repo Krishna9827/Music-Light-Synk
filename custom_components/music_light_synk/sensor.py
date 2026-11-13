@@ -26,6 +26,8 @@ async def async_setup_entry(
     entities: list[SensorEntity] = [ColorSensor(entry, key, name) for key, name in SLOTS]
     entities.append(NowPlayingSensor(entry))
     entities.append(ColourSourceSensor(entry))
+    entities.append(AudioSensor(entry))
+    entities.append(WledDriverSensor(entry))
     async_add_entities(entities)
 
 
@@ -124,5 +126,64 @@ class ColourSourceSensor(MusicLightSynkEntity, SensorEntity, RestoreEntity):
         st = data.status
         self._attr_extra_state_attributes = {
             k: st[k] for k in ("source_mode", "media_access", "screen_capture", "app_version") if k in st
+        }
+        return True
+
+
+class AudioSensor(MusicLightSynkEntity, SensorEntity):
+    """What the app listens to right now (for Energy strips / beat pulse / other devices)."""
+
+    _attr_icon = "mdi:waveform"
+    _attr_name = "Audio"
+    _attr_translation_key = "audio"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["output", "mic", "none"]
+
+    def __init__(self, entry: MusicLightSynkConfigEntry) -> None:
+        super().__init__(entry, "audio")
+        self._attr_native_value: str | None = None
+        self._attr_extra_state_attributes: dict[str, Any] = {}
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self._update_from_data()
+
+    def _update_from_data(self) -> bool:
+        st = self._entry.runtime_data.status
+        if not st:
+            return False
+        audio = st.get("audio")
+        self._attr_native_value = audio if audio in ("output", "mic") else "none"
+        self._attr_extra_state_attributes = {
+            "audio_source": self._entry.runtime_data.setting("audio_source"),
+            "backup_listener": bool(st.get("listening")),
+        }
+        return True
+
+
+class WledDriverSensor(MusicLightSynkEntity, SensorEntity):
+    """Which device drives the WLED strips (the app on several devices takes turns)."""
+
+    _attr_icon = "mdi:led-strip-variant"
+    _attr_name = "WLED driven by"
+
+    def __init__(self, entry: MusicLightSynkConfigEntry) -> None:
+        super().__init__(entry, "wled_driver")
+        self._attr_native_value: str | None = None
+        self._attr_extra_state_attributes: dict[str, Any] = {}
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self._update_from_data()
+
+    def _update_from_data(self) -> bool:
+        st = self._entry.runtime_data.status
+        if not st:
+            return False
+        self._attr_native_value = st.get("wled_renderer") or "Nobody"
+        peers = st.get("link_peers")
+        self._attr_extra_state_attributes = {
+            "linked_devices": peers if isinstance(peers, list) else [],
+            "device_link": self._entry.runtime_data.setting("link_enabled"),
         }
         return True

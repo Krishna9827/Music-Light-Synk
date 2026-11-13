@@ -95,7 +95,7 @@ class WledTest {
         DatagramSocket(0).use { rx ->
             rx.soTimeout = 2000
             val ambient = WledAmbient(rx.localPort)
-            ambient.show(mapOf("127.0.0.1" to IntArray(10) { 0xFF0000 }), pulse = false, pulseStrength = 0f)
+            ambient.show(mapOf("127.0.0.1" to WledAmbient.Strip(IntArray(10) { 0xFF0000 })), StripStyle())
             val buf = ByteArray(2048)
             var last = ByteArray(0)
             val t0 = System.currentTimeMillis()
@@ -133,7 +133,7 @@ class WledTest {
      * Tiny fake WLED: GET /json/state returns [state], POST records the body. Plain sockets,
      * because Android unit tests can't use the JDK's com.sun.net.httpserver.
      */
-    private class FakeWled(private val state: String) : AutoCloseable {
+    private class FakeWled(private val state: String, private val info: String = "{}") : AutoCloseable {
         private val server = ServerSocket(0)
         val posts = CopyOnWriteArrayList<JSONObject>()
         val host get() = "127.0.0.1:${server.localPort}"
@@ -151,7 +151,7 @@ class WledTest {
                                 if (line.isEmpty()) break
                                 if (line.lowercase().startsWith("content-length:")) length = line.substringAfter(':').trim().toInt()
                             }
-                            val body = if (requestLine.startsWith("GET")) state else {
+                            val body = if (requestLine.startsWith("GET /json/info")) info else if (requestLine.startsWith("GET")) state else {
                                 val buf = CharArray(length)
                                 var read = 0
                                 while (read < length) read += input.read(buf, read, length - read)
@@ -223,21 +223,6 @@ class WledTest {
         for (frame in 0 until 200) if (d.feed(0.3f, frame * 50L)) beats++
         for (frame in 200 until 400) if (d.feed(0f, frame * 50L)) beats++
         assertEquals(0, beats)
-    }
-
-    @Test
-    fun bassEnergyReadsLowBins() {
-        val n = 1024
-        val sr = 44_100_000 // mHz
-        val fft = ByteArray(n)
-        // put energy in the ~86 Hz bin (k=2) only
-        fft[4] = 100
-        fft[5] = 0
-        val bass = BeatDetector.bassEnergy(fft, sr)
-        assertTrue(bass > 0f)
-        val treble = ByteArray(n).also { it[2 * 200] = 100 } // ~8.6 kHz
-        assertEquals(0f, BeatDetector.bassEnergy(treble, sr), 0f)
-        assertEquals(0f, BeatDetector.bassEnergy(ByteArray(n), sr), 0f)
     }
 
     // ---- multiple devices / zones -------------------------------------------------------------
@@ -330,6 +315,88 @@ class WledTest {
                     assertEquals(false, right.posts.last().getBoolean("on"))
                     c.ambient.shutdown()
                 }
+            }
+        }
+    }
+
+    // ---- Energy effect per device ---------------------------------------------------------------
+
+    @Test
+    fun effectOptionsParseAndRoundTrip() {
+        val raw = "192.168.1.60=ambient:40,22,40,22:bottom_left:cw:energy:flip:mirror; 192.168.1.61=dominant:energy:leds=60; " +
+            "192.168.1.62=left:mirror; 192.168.1.63=palette"
+        val p = WledDevices.parse(raw)
+        assertTrue(p.errors.toString(), p.errors.isEmpty())
+        assertEquals(WledEffect(energy = true, flip = true, mirror = true), p.devices[0].effect)
+        assertTrue(p.devices[0].realtime)
+        assertEquals(WledEffect(energy = true), p.devices[1].effect)
+        assertEquals(60, p.devices[1].leds)
+        assertTrue("an Energy section goes over UDP", p.devices[1].realtime)
+        assertFalse("mirror alone keeps the JSON solid colour", p.devices[2].realtime)
+        assertEquals(raw, WledDevices.format(p.devices))
+        // bar options mean nothing on a palette zone (WLED runs its own effect there)
+        val pal = WledDevices.parse("1.2.3.4=palette:energy:flip").devices.single()
+        assertEquals(WledEffect(), pal.effect)
+        assertEquals("palette", WledDevices.formatDevice(pal))
+        assertEquals(1, WledDevices.parse("1.2.3.4=top:leds=lots").errors.size)
+        assertEquals("Energy, from both ends", p.devices[0].effectLabel)
+    }
+
+    @Test
+    fun configKnowsWhenAudioIsWanted() {
+        val amb = WledDevice("a", WledZone.Ambient(WledDevices.DEFAULT_LAYOUT))
+        val energy = WledDevice("b", WledZone.Section(Slot.DOMINANT), WledEffect(energy = true))
+        val plain = WledDevice("c", WledZone.Section(Slot.LEFT))
+        fun cfg(vararg d: WledDevice, pulse: Boolean = false) = WledConfig(d.toList(), 1f, true, pulse, 0.5f)
+        assertFalse(cfg(plain).wantsAudio)
+        assertFalse(cfg(amb).wantsAudio)
+        assertTrue(cfg(amb, pulse = true).wantsAudio)
+        assertTrue(cfg(energy).wantsAudio)
+        assertFalse("nothing to pulse on an Energy-only setup", cfg(energy, pulse = true).hasPulseTarget)
+    }
+
+    @Test
+    fun energySectionStripBouncesOverUdpWithItsLedCount() {
+        DatagramSocket(0).use { rx ->
+            FakeWled("""{"on":true,"bri":128,"seg":[{"id":0,"fx":9}]}""", """{"leds":{"count":30}}""").use { strip ->
+                val c = WledController(rx.localPort)
+                val cfg = WledConfig(
+                    devices = listOf(WledDevice(strip.host, WledZone.Section(Slot.DOMINANT), WledEffect(energy = true))),
+                    brightness = 1f, restore = true, pulse = false, pulseStrength = 0f, energyBackground = 0f, energyBlur = 0,
+                )
+                val r = c.onColors(cfg, ColorExtractor.testPalette(), sessionStart = true)
+                assertTrue(r.message, r.ok)
+                assertTrue("no JSON state change for a realtime strip", strip.posts.isEmpty())
+                rx.soTimeout = 2000
+                val buf = ByteArray(2048)
+                fun next(): ByteArray {
+                    val pkt = DatagramPacket(buf, buf.size)
+                    rx.receive(pkt)
+                    return buf.copyOf(pkt.length)
+                }
+                assertEquals(4 + 30 * 3, next().size) // LED count came from /json/info
+                fun lit(pkt: ByteArray) = (0 until 30).count { i -> (0..2).any { (pkt[4 + i * 3 + it].toInt() and 0xFF) > 8 } }
+                // music: low bar at ~40 %, then silence-level audio
+                val t0 = System.currentTimeMillis()
+                var bar = -1
+                while (System.currentTimeMillis() - t0 < 2500) {
+                    c.audio(AudioLevels(0.4f, 0f, 0f))
+                    val pkt = next()
+                    if (System.currentTimeMillis() - t0 > 900) { // fade-in done
+                        bar = lit(pkt)
+                        break
+                    }
+                }
+                assertTrue("about 40 % of 30 LEDs lit, got $bar", bar in 9..15)
+                val t1 = System.currentTimeMillis()
+                var quiet = -1
+                while (System.currentTimeMillis() - t1 < 1500) {
+                    c.audio(AudioLevels(0.05f, 0f, 0f))
+                    quiet = lit(next())
+                }
+                assertTrue("the bar falls back, got $quiet", quiet in 0..3)
+                c.onStopped(cfg)
+                c.ambient.shutdown()
             }
         }
     }

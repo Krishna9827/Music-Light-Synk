@@ -180,11 +180,22 @@ class Prefs(context: Context) {
      */
     var wledDevicesRaw: String
         get() = if (sp.contains(K_WLED_DEVICES)) str(K_WLED_DEVICES) else WledDevices.format(legacyWledDevices())
-        set(v) = putStr(K_WLED_DEVICES, WledDevices.format(WledDevices.parse(v).devices))
+        set(v) = setWledDevices(WledDevices.parse(v).devices)
 
     val wledDevices: List<WledDevice> get() = WledDevices.parse(wledDevicesRaw).devices
 
-    fun setWledDevices(devices: List<WledDevice>) = putStr(K_WLED_DEVICES, WledDevices.format(devices))
+    /** A local edit (app, ADB, Home Assistant): becomes the newest list for every linked device. */
+    fun setWledDevices(devices: List<WledDevice>) {
+        sp.edit().putString(K_WLED_DEVICES, WledDevices.format(devices)).putLong(K_WLED_REV, System.currentTimeMillis()).apply()
+    }
+
+    /** When the WLED list was last edited (ms since epoch; 0 = never). Newest wins across the link. */
+    val wledRev: Long get() = sp.getLong(K_WLED_REV, 0L)
+
+    /** A newer list from another device on the link. */
+    fun applySyncedWled(raw: String, rev: Long) {
+        sp.edit().putString(K_WLED_DEVICES, WledDevices.format(WledDevices.parse(raw).devices)).putLong(K_WLED_REV, rev).apply()
+    }
 
     var wledBrightnessPct: Int
         get() = sp.getInt(K_WLED_BRI, 100).coerceIn(1, 100)
@@ -210,7 +221,53 @@ class Prefs(context: Context) {
         restore = wledRestore,
         pulse = pulseEnabled,
         pulseStrength = pulseStrengthPct / 100f,
+        energyBackground = energyBackgroundPct / 100f,
+        energyBlur = energyBlur,
     )
+
+    // ---- Audio and the Energy effect ---------------------------------------------------------
+
+    var audioSource: AudioSource
+        get() = AudioSource.of(str(K_AUDIO_SOURCE, AudioSource.AUTO.key))
+        set(v) = putStr(K_AUDIO_SOURCE, v.key)
+
+    /** How far the bars reach for the same loudness, in %. */
+    var energySensitivityPct: Int
+        get() = sp.getInt(K_ENERGY_SENS, 100).coerceIn(SENSITIVITY_RANGE.first, SENSITIVITY_RANGE.last)
+        set(v) = putInt(K_ENERGY_SENS, v.coerceIn(SENSITIVITY_RANGE.first, SENSITIVITY_RANGE.last))
+
+    /** Softening across neighbouring LEDs, 0 = sharp bars. */
+    var energyBlur: Int
+        get() = sp.getInt(K_ENERGY_BLUR, 2).coerceIn(BLUR_RANGE.first, BLUR_RANGE.last)
+        set(v) = putInt(K_ENERGY_BLUR, v.coerceIn(BLUR_RANGE.first, BLUR_RANGE.last))
+
+    /** Brightness of the strip's colour where no bar is, in %. */
+    var energyBackgroundPct: Int
+        get() = sp.getInt(K_ENERGY_BG, 10).coerceIn(ENERGY_BG_RANGE.first, ENERGY_BG_RANGE.last)
+        set(v) = putInt(K_ENERGY_BG, v.coerceIn(ENERGY_BG_RANGE.first, ENERGY_BG_RANGE.last))
+
+    // ---- Device link -------------------------------------------------------------------------
+
+    /** Share colours / beat with the app on other devices and take turns driving WLED. */
+    var linkEnabled: Boolean
+        get() = sp.getBoolean(K_LINK, true)
+        set(v) = putBool(K_LINK, v)
+
+    /** Name shown on other devices; empty = the device model. */
+    var deviceName: String
+        get() = str(K_DEVICE_NAME)
+        set(v) = putStr(K_DEVICE_NAME, v.take(40))
+
+    /** Random id for the link, made once. */
+    val deviceId: String
+        get() = str(K_DEVICE_ID).ifEmpty {
+            java.util.UUID.randomUUID().toString().replace("-", "").take(10).also { putStr(K_DEVICE_ID, it) }
+        }
+
+    /** Phone as backup listener: keeps the mic on and drives WLED when nothing else does. */
+    var listenerEnabled: Boolean
+        get() = sp.getBoolean(K_LISTENER, false)
+        set(v) = putBool(K_LISTENER, v)
 
     // v0.3 settings: one mode for all hosts. Still accepted over ADB and converted to devices.
     var legacyWledMode: WledMode
@@ -270,6 +327,9 @@ class Prefs(context: Context) {
         val MIN_BRIGHTNESS_RANGE = 1..60
         val SCREEN_INTERVAL_RANGE = 0..120
         val STOP_DELAY_RANGE = 0..300
+        val SENSITIVITY_RANGE = 10..300
+        val BLUR_RANGE = 0..10
+        val ENERGY_BG_RANGE = 0..100
 
         private const val K_URL = "ha_url"
         private const val K_WEBHOOK = "webhook_id"
@@ -306,6 +366,15 @@ class Prefs(context: Context) {
         private const val K_WLED_RESTORE = "wled_restore"
         private const val K_PULSE = "pulse"
         private const val K_PULSE_STRENGTH = "pulse_strength"
+        private const val K_WLED_REV = "wled_devices_rev"
+        private const val K_AUDIO_SOURCE = "audio_source"
+        private const val K_ENERGY_SENS = "energy_sensitivity"
+        private const val K_ENERGY_BLUR = "energy_blur"
+        private const val K_ENERGY_BG = "energy_bg"
+        private const val K_LINK = "link_enabled"
+        private const val K_DEVICE_NAME = "device_name"
+        private const val K_DEVICE_ID = "link_id"
+        private const val K_LISTENER = "listener"
 
         fun normalizeUrl(raw: String): String {
             var s = raw.trim().trimEnd('/')

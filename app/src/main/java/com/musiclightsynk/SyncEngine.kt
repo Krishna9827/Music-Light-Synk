@@ -1,6 +1,8 @@
 package com.musiclightsynk
 
 import android.content.Context
+import android.content.pm.PackageManager
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
@@ -19,7 +21,11 @@ import java.util.concurrent.CopyOnWriteArraySet
  * bulbs like Tuya lag. Then fans each update out to every configured output:
  * Home Assistant webhook(s), MQTT, and WLED directly.
  *
- * All state below is only touched on the engine thread.
+ * WLED strips can also bounce with the music (Energy effect): audio comes from this device
+ * ([AudioEngine]) or from another device on the [Link], and only one device drives the strips at
+ * a time ([LightHub]): the one playing music, else a phone listening as backup.
+ *
+ * All state below is only touched on the engine thread unless marked otherwise.
  */
 object SyncEngine {
     private const val TAG = "MusicLightSynk"
@@ -31,6 +37,11 @@ object SyncEngine {
     private const val SRC_ARTWORK = "artwork"
     private const val SRC_SCREEN = "screen"
 
+    private const val HEARTBEAT_MS = 1000L
+    private const val HELLO_MS = 3000L
+    private const val HUB_START_MS = 3000L
+    private const val PEER_PAL_TTL_MS = 10_000L
+
     data class Status(
         val nowPlaying: String = "Nothing playing",
         val nowPackage: String? = null,
@@ -38,6 +49,13 @@ object SyncEngine {
         val palette: Palette? = null,
         val source: String? = null,
         val note: String? = null,
+        /** "output" / "mic" while listening to music, else null. */
+        val audio: String? = null,
+        /** Names of the other devices running the app. */
+        val peers: List<String> = emptyList(),
+        /** Who drives the WLED strips: "This device", another device's name, or null. */
+        val renderer: String? = null,
+        val listening: Boolean = false,
     )
 
     private val thread = HandlerThread("mls-engine").apply { start() }
@@ -66,11 +84,43 @@ object SyncEngine {
     private var lastWledCfg: WledConfig? = null
     private var lastStatusJson: String? = null
 
-    /** Main thread only. */
-    private val pulse = AudioPulse(
-        onBeat = { wled.ambient.beat() },
+    /** Main thread only (start/stop). */
+    private val audio = AudioEngine(
+        onLevels = { l, silent -> onLocalLevels(l, silent) },
         onStatus = { msg -> handler.post { setStatus(status.copy(note = msg)) } },
     )
+
+    // audio routing: written from the audio / link threads
+    @Volatile
+    private var localLoudAt = 0L
+
+    @Volatile
+    private var peerNrgFrom: String? = null
+
+    @Volatile
+    private var peerNrgAt = 0L
+
+    // device link
+    @Volatile
+    private var link: Link? = null
+    private var hub = LightHub("")
+    private var selfId = ""
+    private var multicastLock: WifiManager.MulticastLock? = null
+    private var heartbeatScheduled = false
+    private var lastHiAt = 0L
+    private var lastPalAt = 0L
+
+    // who drives WLED
+    private var rendering = false
+    private var renderPrio = 0
+    private var playingSince = 0L
+    private var listenerActive = false
+    private var soundSince = 0L
+    private var peerPal: LinkProtocol.Pal? = null
+    private var peerPalAt = 0L
+    private var lastPalette: Palette? = null
+    private var hubShown: Palette? = null
+    private val heartbeat = Runnable { onHeartbeat() }
 
     private val stopTask = Runnable { onStopTimeout() }
     private val pollTask = Runnable { onPoll() }
@@ -104,6 +154,21 @@ object SyncEngine {
         }
     }
 
+    /** The phone's backup listener started / stopped ([ListenerService]). */
+    fun setListener(ctx: Context, active: Boolean) {
+        val app = ctx.applicationContext
+        handler.post {
+            appCtx = app
+            listenerActive = active
+            soundSince = 0L
+            val prefs = Prefs(app)
+            ensureLink(app, prefs)
+            updateAudio(app, prefs)
+            updateRendering(prefs)
+            setStatus(status.copy(listening = active))
+        }
+    }
+
     /**
      * Tell Home Assistant / MQTT what the app is doing (media access, screen capture, source
      * mode, settings). Sent only when something changed, unless [force].
@@ -112,7 +177,9 @@ object SyncEngine {
         val app = ctx.applicationContext
         handler.post {
             appCtx = app
-            sendStatus(app, Prefs(app), force)
+            val prefs = Prefs(app)
+            ensureLink(app, prefs)
+            sendStatus(app, prefs, force)
         }
     }
 
@@ -125,10 +192,12 @@ object SyncEngine {
             artCacheKey = null
             if (!prefs.isMqttConfigured) mqtt.close()
             if (!prefs.isWledConfigured) releaseWled()
+            ensureLink(app, prefs)
             sendStatus(app, prefs, force = false)
             if (!prefs.enabled) {
                 handler.removeCallbacks(pollTask)
-                updatePulse(prefs, false)
+                updateAudio(app, prefs)
+                updateRendering(prefs)
                 return@post
             }
             val np = current
@@ -136,7 +205,9 @@ object SyncEngine {
                 process(app, prefs, np, trackChanged = true, force = true)
                 schedulePoll(prefs, np)
             }
-            updatePulse(prefs, np?.playing == true)
+            hubShown = null // re-send the hub's colours with the new settings
+            updateAudio(app, prefs)
+            updateRendering(prefs)
         }
     }
 
@@ -167,16 +238,17 @@ object SyncEngine {
     private fun handleNowPlaying(ctx: Context, np: NowPlaying?) {
         val prefs = Prefs(ctx)
         current = np
+        ensureLink(ctx, prefs)
         setStatus(status.copy(nowPlaying = np?.describe() ?: "Nothing playing", nowPackage = np?.packageName))
         if (!prefs.enabled) {
             handler.removeCallbacks(pollTask)
-            updatePulse(prefs, false)
+            updateAudio(ctx, prefs)
             return
         }
 
         if (np == null || !np.playing) {
             handler.removeCallbacks(pollTask)
-            updatePulse(prefs, false)
+            updateAudio(ctx, prefs)
             if (sessionActive && !stopScheduled) {
                 stopScheduled = true
                 handler.postDelayed(stopTask, prefs.stopDelaySec * 1000L)
@@ -192,7 +264,7 @@ object SyncEngine {
         currentKey = np.trackKey
         process(ctx, prefs, np, trackChanged, force = false)
         schedulePoll(prefs, np)
-        updatePulse(prefs, true)
+        updateAudio(ctx, prefs)
     }
 
     private fun process(ctx: Context, prefs: Prefs, np: NowPlaying, trackChanged: Boolean, force: Boolean) {
@@ -228,6 +300,8 @@ object SyncEngine {
     private fun sendPalette(prefs: Prefs, np: NowPlaying, palette: Palette, source: String, reason: String, force: Boolean) {
         lastSource = source
         val sessionStart = !sessionActive
+        if (sessionStart) playingSince = SystemClock.elapsedRealtime()
+        lastPalette = palette
         if (!force && !sessionStart && palette.maxDistanceTo(lastSent) < CHANGE_THRESHOLD) {
             // Lights already show these colours - don't spam slow bulbs with a duplicate command.
             setStatus(status.copy(palette = palette, source = source))
@@ -239,6 +313,7 @@ object SyncEngine {
             lastSent = palette
             sessionActive = true
         }
+        sendPal(np, palette, playing = true)
         Log.i(TAG, "colors ($source/$reason) -> ${r.message}: $palette")
         setStatus(status.copy(lastResult = stamp("Sent $source colours -> ${r.message}"), palette = palette, source = source))
     }
@@ -289,27 +364,295 @@ object SyncEngine {
         val prefs = Prefs(ctx)
         val r = deliver(prefs, withStatus(ctx, prefs, Payloads.stopped(current, device)), null, sessionStart = false, preview = false)
         sessionActive = false
+        lastSent?.let { sendPal(current, it, playing = false) }
         lastSent = null
         currentKey = null
         lastSource = null
         setStatus(status.copy(lastResult = stamp("Playback stopped -> ${r.message}")))
-    }
-
-    /** Beat pulse runs only while playing, in WLED ambient mode, with pulse switched on. */
-    private fun updatePulse(prefs: Prefs, playing: Boolean) {
-        val ctx = appCtx ?: return
-        val want = playing && prefs.enabled && prefs.pulseEnabled &&
-            prefs.isWledConfigured && prefs.wledConfig().hasAmbient
-        wled.ambient.setPulse(want, prefs.pulseStrengthPct / 100f)
-        main.post {
-            if (want && !pulse.isRunning) pulse.start(ctx) else if (!want && pulse.isRunning) pulse.stop()
-        }
+        updateAudio(ctx, prefs)
+        updateRendering(prefs) // a backup listener may take over now
     }
 
     private fun releaseWled() {
         lastWledCfg?.let { wled.release(it.restore) }
         lastWledCfg = null
+        rendering = false
+        renderPrio = 0
+        hubShown = null
     }
+
+    // ---- audio -------------------------------------------------------------------------------
+
+    /**
+     * Listen while this device plays music and something wants the levels (an Energy strip, the
+     * beat pulse, or another device on the link), or all the time as the phone's backup listener.
+     */
+    private fun updateAudio(ctx: Context, prefs: Prefs) {
+        val src = prefs.audioSource
+        val playing = prefs.enabled && current?.playing == true &&
+            current?.let { prefs.profileFor(it.packageName) } != AppProfile.OFF
+        val wanted = (prefs.isWledConfigured && prefs.wledConfig().wantsAudio) || link?.peers()?.isNotEmpty() == true
+        val want = when {
+            !prefs.enabled || src == AudioSource.OFF -> AudioSource.OFF
+            playing && wanted -> src
+            listenerActive -> AudioSource.MIC
+            else -> AudioSource.OFF
+        }
+        val sens = prefs.energySensitivityPct / 100f
+        main.post {
+            audio.sensitivity = sens
+            audio.start(ctx, want)
+        }
+    }
+
+    /** Audio thread (main or mic). */
+    private fun onLocalLevels(l: AudioLevels, silent: Boolean) {
+        if (silent) return
+        localLoudAt = SystemClock.elapsedRealtime()
+        wled.audio(l)
+        link?.sendToPeers(LinkProtocol.Nrg(selfId, l))
+    }
+
+    /** Link thread: another device's levels, used while this device hears nothing itself. */
+    private fun onPeerLevels(from: String, l: AudioLevels) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - localLoudAt < 500) return
+        val current = peerNrgFrom
+        if (current != null && current != from && now - peerNrgAt < 500) return // stick to one peer
+        peerNrgFrom = from
+        peerNrgAt = now
+        wled.audio(l)
+    }
+
+    // ---- device link ---------------------------------------------------------------------------
+
+    private fun ensureLink(ctx: Context, prefs: Prefs) {
+        if (selfId.isEmpty()) {
+            selfId = prefs.deviceId
+            hub = LightHub(selfId)
+        }
+        val l = link
+        if (prefs.linkEnabled && l == null) {
+            val nl = Link(selfId) { m -> onLinkMessage(m) }
+            if (nl.start()) {
+                link = nl
+                lastHiAt = 0L
+                acquireMulticast(ctx)
+                Log.i(TAG, "Device link on (id $selfId)")
+            } else {
+                Log.w(TAG, "Device link: UDP port ${LinkProtocol.PORT} unavailable")
+            }
+        } else if (!prefs.linkEnabled && l != null) {
+            l.stop()
+            link = null
+            releaseMulticast()
+            setStatus(status.copy(peers = emptyList()))
+        }
+        if (!heartbeatScheduled && (link != null || listenerActive || rendering)) {
+            heartbeatScheduled = true
+            handler.postDelayed(heartbeat, HEARTBEAT_MS)
+        }
+    }
+
+    /** Link thread. Levels go straight to the renderer; everything else via the engine thread. */
+    private fun onLinkMessage(m: LinkProtocol.Msg) {
+        if (m is LinkProtocol.Nrg) {
+            onPeerLevels(m.from, m.levels)
+            return
+        }
+        handler.post {
+            val ctx = appCtx ?: return@post
+            val now = SystemClock.elapsedRealtime()
+            when (m) {
+                is LinkProtocol.Claim -> {
+                    hub.onClaim(m.from, m.prio, m.playingForMs, now)
+                    updateRendering(Prefs(ctx))
+                }
+                is LinkProtocol.Pal -> {
+                    peerPal = m
+                    peerPalAt = now
+                    lastPalette = LinkProtocol.palette(m.colors, Prefs(ctx).extractOptions())
+                    if (rendering && renderPrio == LightHub.PRIO_LISTENING) updateRendering(Prefs(ctx))
+                }
+                is LinkProtocol.Wled -> {
+                    val prefs = Prefs(ctx)
+                    if (m.rev > prefs.wledRev) {
+                        Log.i(TAG, "WLED devices updated from ${link?.peer(m.from)?.name ?: m.from}")
+                        prefs.applySyncedWled(m.devices, m.rev)
+                        settingsChanged(ctx)
+                        notifyUi()
+                    }
+                }
+                is LinkProtocol.Hi -> if (now - lastHiAt > 1000) sendHello(ctx, Prefs(ctx), now) // answer newcomers quickly
+                is LinkProtocol.Nrg -> Unit
+            }
+        }
+    }
+
+    private fun onHeartbeat() {
+        heartbeatScheduled = false
+        val ctx = appCtx ?: return
+        val prefs = Prefs(ctx)
+        val now = SystemClock.elapsedRealtime()
+        val l = link
+        if (l != null) {
+            if (now - lastHiAt >= HELLO_MS) sendHello(ctx, prefs, now)
+            val sent = lastSent
+            if (sessionActive && sent != null && now - lastPalAt >= HELLO_MS) sendPal(current, sent, playing = true)
+        }
+        updateRendering(prefs)
+        updateAudio(ctx, prefs) // e.g. another device just appeared and wants our levels
+        updateLinkStatus(now)
+        if (link != null || listenerActive || rendering) {
+            heartbeatScheduled = true
+            handler.postDelayed(heartbeat, HEARTBEAT_MS)
+        }
+    }
+
+    private fun sendHello(ctx: Context, prefs: Prefs, now: Long) {
+        val l = link ?: return
+        lastHiAt = now
+        l.broadcast(LinkProtocol.Hi(selfId, deviceName(prefs), platform(ctx), listenerActive))
+        if (prefs.wledRev > 0) l.sendToPeers(LinkProtocol.Wled(selfId, prefs.wledDevicesRaw, prefs.wledRev))
+    }
+
+    private fun sendPal(np: NowPlaying?, palette: Palette, playing: Boolean) {
+        val l = link ?: return
+        lastPalAt = SystemClock.elapsedRealtime()
+        l.sendToPeers(LinkProtocol.Pal(selfId, LinkProtocol.colorsOf(palette), playing, np?.describe()))
+    }
+
+    private fun updateLinkStatus(now: Long) {
+        val peers = link?.peers()?.map { it.name }?.sorted() ?: emptyList()
+        val renderer = when {
+            rendering -> "This device"
+            else -> hub.otherRenderer(now)?.let { id -> link?.peer(id)?.name ?: id }
+        }
+        val a = audio.active
+        if (peers != status.peers || renderer != status.renderer || a != status.audio) {
+            setStatus(status.copy(peers = peers, renderer = renderer, audio = a))
+            appCtx?.let { sendStatus(it, Prefs(it), force = false) } // keep Home Assistant's sensors current
+        }
+    }
+
+    // ---- who drives WLED -----------------------------------------------------------------------
+
+    /** Priority this device would drive WLED with right now (0 = it doesn't want to). */
+    private fun wantedPrio(prefs: Prefs, now: Long): Int {
+        if (!prefs.enabled || !prefs.isWledConfigured) return 0
+        if (sessionActive) return LightHub.PRIO_PLAYING
+        if (!listenerActive) return 0
+        // Backup listener: music heard for a few seconds (not just a door slam), kept until
+        // it has been quiet for the stop delay.
+        val heard = now - localLoudAt < 1500
+        if (heard && soundSince == 0L) soundSince = now
+        val quietLimit = maxOf(prefs.stopDelaySec, 5) * 1000L
+        if (!heard && now - localLoudAt > quietLimit) soundSince = 0L
+        val listening = soundSince != 0L && now - soundSince >= HUB_START_MS
+        val peerPlaying = peerPal?.playing == true && now - peerPalAt < PEER_PAL_TTL_MS
+        return if (listening || peerPlaying) LightHub.PRIO_LISTENING else 0
+    }
+
+    private fun playingFor(prio: Int, now: Long): Long = when (prio) {
+        LightHub.PRIO_PLAYING -> now - playingSince
+        else -> if (soundSince == 0L) Long.MAX_VALUE / 4 else now - soundSince
+    }
+
+    private fun mayRender(prio: Int, now: Long): Boolean =
+        if (link == null) prio > 0 else hub.mayRender(prio, playingFor(prio, now), now)
+
+    /** Start, keep or stop driving WLED, and tell the other devices. Engine thread. */
+    private fun updateRendering(prefs: Prefs) {
+        val now = SystemClock.elapsedRealtime()
+        val prio = wantedPrio(prefs, now)
+        val may = mayRender(prio, now)
+        val l = link
+        if (may) l?.sendToPeers(LinkProtocol.Claim(selfId, prio, playingFor(prio, now)))
+        when {
+            may && prio == LightHub.PRIO_PLAYING -> {
+                if (!rendering) {
+                    // Took over (or got back) the strips mid-song: show this device's colours.
+                    rendering = true
+                    renderPrio = prio
+                    lastSent?.let { p ->
+                        val cfg = prefs.wledConfig()
+                        lastWledCfg = cfg
+                        wled.onColors(cfg, p, sessionStart = hub.otherRenderer(now) == null)
+                    }
+                }
+                renderPrio = prio
+                hubShown = null
+            }
+            may && prio == LightHub.PRIO_LISTENING -> {
+                rendering = true
+                renderPrio = prio
+                showHubColours(prefs, now)
+            }
+            !may && rendering -> {
+                rendering = false
+                renderPrio = 0
+                hubShown = null
+                if (prio == 0) {
+                    l?.sendToPeers(LinkProtocol.Claim(selfId, 0, 0))
+                    stopWled(prefs)
+                } else {
+                    // Another device took over: stop streaming, but don't put WLED's old state back
+                    // now; that could land after the other device's colours.
+                    wled.ambient.stop()
+                }
+            }
+            // We stepped aside earlier and nobody drives the strips any more: put WLED back as it was.
+            !rendering && prio == 0 && wled.hasSavedState && hub.otherRenderer(now) == null -> stopWled(prefs)
+        }
+        if (!heartbeatScheduled && rendering) ensureLink(appCtx ?: return, prefs)
+    }
+
+    private fun stopWled(prefs: Prefs) {
+        lastWledCfg?.let { wled.onStopped(it) } ?: wled.release(prefs.wledRestore)
+    }
+
+    /** As backup listener: the playing device's colours if one tells us, else the last colours seen. */
+    private fun showHubColours(prefs: Prefs, now: Long) {
+        val pal = peerPal
+        val palette = if (pal != null && pal.playing && now - peerPalAt < PEER_PAL_TTL_MS) {
+            LinkProtocol.palette(pal.colors, prefs.extractOptions())
+        } else {
+            lastPalette ?: ColorExtractor.testPalette(prefs.extractOptions())
+        }
+        val shown = hubShown
+        if (shown != null && palette.maxDistanceTo(shown) < CHANGE_THRESHOLD) return
+        val cfg = prefs.wledConfig()
+        lastWledCfg = cfg
+        val r = wled.onColors(cfg, palette, sessionStart = shown == null && hub.otherRenderer(now) == null)
+        hubShown = palette
+        setStatus(status.copy(lastResult = stamp("Backup listener -> ${r.message}"), palette = palette, source = "listener"))
+    }
+
+    private fun acquireMulticast(ctx: Context) {
+        if (multicastLock != null) return
+        try {
+            val wm = ctx.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return
+            multicastLock = wm.createMulticastLock("mls-link").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "No multicast lock; devices may find each other slower", e)
+        }
+    }
+
+    private fun releaseMulticast() {
+        try {
+            multicastLock?.release()
+        } catch (_: Exception) {
+        }
+        multicastLock = null
+    }
+
+    private fun deviceName(prefs: Prefs): String = prefs.deviceName.ifBlank { Build.MODEL ?: device }
+
+    private fun platform(ctx: Context): String =
+        if (ctx.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)) "tv" else "phone"
 
     private fun ctxOrNull(): Context? = appCtx
 
@@ -329,6 +672,10 @@ object SyncEngine {
         .put("source_mode", prefs.sourceMode.key)
         .put("last_source", lastSource ?: JSONObject.NULL)
         .put("enabled", prefs.enabled)
+        .put("audio", audio.active ?: JSONObject.NULL)
+        .put("listening", listenerActive)
+        .put("link_peers", org.json.JSONArray(status.peers))
+        .put("wled_renderer", status.renderer ?: JSONObject.NULL)
         .put(
             "settings",
             JSONObject()
@@ -346,6 +693,12 @@ object SyncEngine {
                 .put("wled_restore", prefs.wledRestore)
                 .put("pulse", prefs.pulseEnabled)
                 .put("pulse_strength", prefs.pulseStrengthPct)
+                .put("audio_source", prefs.audioSource.key)
+                .put("energy_sensitivity", prefs.energySensitivityPct)
+                .put("energy_blur", prefs.energyBlur)
+                .put("energy_bg", prefs.energyBackgroundPct)
+                .put("link_enabled", prefs.linkEnabled)
+                .put("device_name", prefs.deviceName)
                 .put("mqtt_enabled", prefs.mqttEnabled),
         )
 
@@ -415,10 +768,23 @@ object SyncEngine {
         if (prefs.isWledConfigured) {
             val cfg = prefs.wledConfig()
             lastWledCfg = cfg
+            val wasRendering = rendering && renderPrio == LightHub.PRIO_PLAYING
+            // Taking the strips from another device: its colours are not WLED's "own" state to restore later.
+            val takingOver = !wasRendering && hub.otherRenderer(SystemClock.elapsedRealtime()) != null
             val r = when {
-                stopped -> wled.onStopped(cfg)
-                palette != null -> wled.onColors(cfg, palette, sessionStart, preview)
-                else -> null
+                stopped -> if (rendering && renderPrio == LightHub.PRIO_PLAYING) {
+                    rendering = false
+                    renderPrio = 0
+                    link?.sendToPeers(LinkProtocol.Claim(selfId, 0, 0))
+                    wled.onStopped(cfg)
+                } else {
+                    null
+                }
+                palette == null -> null
+                preview -> wled.onColors(cfg, palette, sessionStart, preview = true)
+                // taking the strips over mid-song counts as a new session (save WLED's state first)
+                claimWled(prefs) -> wled.onColors(cfg, palette, (sessionStart || !wasRendering) && !takingOver, preview = false)
+                else -> WledController.Result(false, "WLED: ${status.renderer ?: "another device"} drives the strips")
             }
             if (r != null) {
                 if (r.ok) ok = true
@@ -426,6 +792,20 @@ object SyncEngine {
             }
         }
         return HaClient.Result(ok, if (ok) 200 else -1, parts.joinToString(" | "))
+    }
+
+    /** About to send this device's colours: may it drive WLED (it plays music)? Claims it if so. */
+    private fun claimWled(prefs: Prefs): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (!mayRender(LightHub.PRIO_PLAYING, now)) return false
+        if (!rendering || renderPrio != LightHub.PRIO_PLAYING) {
+            rendering = true
+            renderPrio = LightHub.PRIO_PLAYING
+            hubShown = null
+            link?.sendToPeers(LinkProtocol.Claim(selfId, LightHub.PRIO_PLAYING, playingFor(LightHub.PRIO_PLAYING, now)))
+            appCtx?.let { ensureLink(it, prefs) }
+        }
+        return true
     }
 
     private fun stamp(msg: String): String = "${timeFmt.format(Date())}  $msg"

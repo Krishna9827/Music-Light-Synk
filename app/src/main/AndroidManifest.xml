@@ -7,9 +7,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Beat pulse: Android's Visualizer on the output mix needs both. Only asked for when you turn pulse on. -->
+    <!-- Energy effect / beat pulse: Android's Visualizer on the output mix needs both; the phone's
+         backup listener uses the microphone (RECORD_AUDIO) in a microphone foreground service. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Device link: find the app on other devices on the Wi-Fi (UDP broadcast). -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <!-- Lets the app re-open screen capture after a reboot (granted via adb appops; optional). -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- Only used to show the name of the app that is playing (Android 11+ package visibility). -->
@@ -23,6 +27,9 @@
         android:required="false" />
     <uses-feature
         android:name="android.hardware.touchscreen"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.microphone"
         android:required="false" />
 
     <application
@@ -70,6 +77,12 @@
             android:name=".ScreenCaptureService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
+
+        <!-- Phone backup listener (microphone). -->
+        <service
+            android:name=".ListenerService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
 
         <receiver
             android:name=".BootReceiver"

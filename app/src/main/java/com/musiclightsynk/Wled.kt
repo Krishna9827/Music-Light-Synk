@@ -26,6 +26,10 @@ import kotlin.math.roundToInt
  *  Ambient : UDP realtime (DNRGB). Paints a smooth gradient through the 4 corner + 4 side colours
  *            around the TV, fades between tracks, optionally pulses on the beat. When we stop
  *            sending, WLED returns to whatever it was doing by itself after ~2 s.
+ *
+ * Any Section or Ambient device can also run the Energy effect ([WledEffect]): bars bounce with
+ * the music. That always goes over UDP realtime (a Section strip then needs its LED count, read
+ * from /json/info or given as leds=N).
  */
 
 enum class WledMode(val key: String, val label: String) {
@@ -173,8 +177,14 @@ object WledJson {
         return body
     }
 
-    fun getState(host: String): JSONObject? = try {
-        val conn = URL("http://$host/json/state").openConnection() as HttpURLConnection
+    fun getState(host: String): JSONObject? = get(host, "/json/state")
+
+    /** Number of LEDs the WLED drives (/json/info -> leds.count), or null if unreachable. */
+    fun ledCount(host: String): Int? =
+        get(host, "/json/info")?.optJSONObject("leds")?.optInt("count", 0)?.takeIf { it in 1..4000 }
+
+    private fun get(host: String, path: String): JSONObject? = try {
+        val conn = URL("http://$host$path").openConnection() as HttpURLConnection
         try {
             conn.connectTimeout = 2500
             conn.readTimeout = 3000
@@ -254,13 +264,38 @@ sealed class WledZone {
     }
 }
 
-data class WledDevice(val host: String, val zone: WledZone)
+/**
+ * One WLED and what it shows. [effect] applies to Section and Ambient zones (a Palette zone runs
+ * WLED's own effect). [leds] overrides the LED count for an Energy section strip (0 = ask WLED).
+ */
+data class WledDevice(
+    val host: String,
+    val zone: WledZone,
+    val effect: WledEffect = WledEffect(),
+    val leds: Int = 0,
+) {
+    /** Driven over UDP realtime rather than the JSON API. */
+    val realtime: Boolean get() = zone is WledZone.Ambient || (zone is WledZone.Section && effect.energy)
+
+    val effectLabel: String
+        get() = if (!effect.energy || zone is WledZone.Palette) "" else buildString {
+            append("Energy")
+            when {
+                effect.mirror && effect.flip -> append(", from both ends")
+                effect.mirror -> append(", from the middle")
+                effect.flip -> append(", from the last LED")
+            }
+        }
+}
 
 /**
  * WLED device list as one human-editable string (stored in prefs, sent over ADB, shown in HA):
  *
  *   192.168.1.60=ambient:40,22,40,22:bottom_left:cw ; 192.168.1.61=top_left ;
- *   192.168.1.62=left:keep ; 192.168.1.63=palette:dominant,vibrant,average:fx=28:pal=5
+ *   192.168.1.62=left:keep ; 192.168.1.63=palette:dominant,vibrant,average:fx=28:pal=5 ;
+ *   192.168.1.64=dominant:energy ; 192.168.1.65=ambient:40,22,40,22:bottom_left:cw:energy:mirror:flip
+ *
+ * Effect options (any order, after the zone): energy, flip, mirror, leds=N.
  *
  * Pure, unit tested.
  */
@@ -283,18 +318,49 @@ object WledDevices {
                 errors += "'$entry': expected host=zone"
                 continue
             }
-            val opts = parts.drop(1)
+            var effect = WledEffect()
+            var leds = 0
+            val opts = ArrayList<String>()
+            for (o in parts.drop(1)) {
+                when {
+                    o.equals("energy", true) -> effect = effect.copy(energy = true)
+                    o.equals("flip", true) -> effect = effect.copy(flip = true)
+                    o.equals("mirror", true) -> effect = effect.copy(mirror = true)
+                    o.startsWith("leds=", true) -> leds = o.substring(5).toIntOrNull()?.coerceIn(0, 4000) ?: -1
+                    else -> opts += o
+                }
+            }
+            if (leds < 0) {
+                errors += "'$entry': leds= needs a number"
+                continue
+            }
             val parsed: WledZone? = when (zone) {
                 "ambient", "gradient" -> parseAmbient(opts)
                 "palette", "colors", "colours", "effect" -> parsePalette(opts)
                 else -> slotOf(zone)?.let { WledZone.Section(it, opts.any { o -> o.equals("keep", true) }) }
             }
-            if (parsed == null) errors += "'$entry': unknown zone or bad options" else devices += WledDevice(host, parsed)
+            when (parsed) {
+                null -> errors += "'$entry': unknown zone or bad options"
+                // WLED's own effect runs on a palette zone; bar options don't apply
+                is WledZone.Palette -> devices += WledDevice(host, parsed)
+                else -> devices += WledDevice(host, parsed, effect, leds)
+            }
         }
         return Parsed(devices, errors)
     }
 
-    fun format(devices: List<WledDevice>): String = devices.joinToString("; ") { "${it.host}=${formatZone(it.zone)}" }
+    fun format(devices: List<WledDevice>): String = devices.joinToString("; ") { "${it.host}=${formatDevice(it)}" }
+
+    /** Zone plus effect options, i.e. everything after "host=". */
+    fun formatDevice(d: WledDevice): String = buildString {
+        append(formatZone(d.zone))
+        if (d.zone !is WledZone.Palette) {
+            if (d.effect.energy) append(":energy")
+            if (d.effect.flip) append(":flip")
+            if (d.effect.mirror) append(":mirror")
+            if (d.leds > 0) append(":leds=").append(d.leds)
+        }
+    }
 
     fun formatZone(zone: WledZone): String = when (zone) {
         is WledZone.Section -> zone.slot.key + if (zone.keepEffect) ":keep" else ""
@@ -362,29 +428,55 @@ object WledDevices {
     }
 }
 
+/** Look of the realtime strips: beat pulse for plain gradients, background and blur for Energy bars. */
+data class StripStyle(
+    val pulse: Boolean = false,
+    val pulseStrength: Float = 0.6f,
+    /** Energy: brightness of the strip's colour where no bar is, 0..1. */
+    val energyBackground: Float = 0.1f,
+    /** Energy: smoothing passes across neighbouring LEDs. */
+    val energyBlur: Int = 2,
+)
+
 /**
- * Ambient renderer on its own thread, for any number of WLED devices (each with its own
- * frame). Sends ~30 fps while fading or pulsing, otherwise a keep-alive frame every second
- * (WLED drops out of realtime mode 2 s after the last packet).
+ * Realtime (UDP) renderer on its own thread, for any number of WLED devices, each with its own
+ * frame. Sends ~30 fps while fading or pulsing and ~40 fps while Energy bars move with fresh
+ * audio, otherwise a keep-alive frame every second (WLED drops out of realtime mode 2 s after
+ * the last packet).
  */
 class WledAmbient(private val udpPort: Int = WledPackets.UDP_PORT) {
+    /** What one strip shows: its base colours per LED, plus the Energy effect if switched on. */
+    class Strip(
+        val base: IntArray,
+        val effect: WledEffect = WledEffect(),
+        /** Lows / mids / highs bar colours, or null for bars in the base colours. */
+        val bands: IntArray? = null,
+    )
+
     private val exec = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "mls-wled").apply { isDaemon = true } }
     private val sender = UdpSender()
 
-    private class Target(var frame: IntArray) {
-        var shown = FloatArray(frame.size * 3)
-        var from = FloatArray(frame.size * 3)
+    private class Target(var strip: Strip) {
+        var shown = FloatArray(strip.base.size * 3)
+        var from = FloatArray(strip.base.size * 3)
     }
 
     // all fields below: renderer thread only
     private val targets = LinkedHashMap<String, Target>()
     private var fadeStart = 0L
-    private var pulse = false
-    private var pulseStrength = 0.6f
+    private var style = StripStyle()
     private var envelope = 0f
     private var lastTick = 0L
+    private val shownLevels = FloatArray(3)
     private var task: ScheduledFuture<*>? = null
     private var stopTask: ScheduledFuture<*>? = null
+
+    // written by the audio source, read by the renderer
+    @Volatile
+    private var levels = AudioLevels.SILENT
+
+    @Volatile
+    private var levelsAt = Long.MIN_VALUE / 2
 
     @Volatile
     var running = false
@@ -395,24 +487,23 @@ class WledAmbient(private val udpPort: Int = WledPackets.UDP_PORT) {
         private set
 
     /**
-     * Show new frames (host -> one colour per LED), fading from what each strip shows now.
-     * Devices missing from [frames] are released. Safe from any thread.
+     * Show new strips (host -> strip), fading from what each strip shows now. Devices missing
+     * from [strips] are released. Safe from any thread.
      */
-    fun show(frames: Map<String, IntArray>, pulse: Boolean, pulseStrength: Float, durationMs: Long = 0) {
+    fun show(strips: Map<String, Strip>, style: StripStyle, durationMs: Long = 0) {
         exec.execute {
             stopTask?.cancel(false)
-            for (host in targets.keys - frames.keys) release(host)
-            for ((host, frame) in frames) {
+            for (host in targets.keys - strips.keys) release(host)
+            for ((host, strip) in strips) {
                 val t = targets[host]
-                if (t == null || t.shown.size != frame.size * 3) {
-                    targets[host] = Target(frame) // new device or new LED count: fade in from black
+                if (t == null || t.shown.size != strip.base.size * 3) {
+                    targets[host] = Target(strip) // new device or new LED count: fade in from black
                 } else {
                     System.arraycopy(t.shown, 0, t.from, 0, t.shown.size)
-                    t.frame = frame
+                    t.strip = strip
                 }
             }
-            this.pulse = pulse
-            this.pulseStrength = pulseStrength.coerceIn(0f, 1f)
+            this.style = style
             fadeStart = now()
             running = targets.isNotEmpty()
             if (running) reschedule(0)
@@ -421,13 +512,22 @@ class WledAmbient(private val udpPort: Int = WledPackets.UDP_PORT) {
     }
 
     fun setPulse(enabled: Boolean, strength: Float) = exec.execute {
-        pulse = enabled
-        pulseStrength = strength.coerceIn(0f, 1f)
+        style = style.copy(pulse = enabled, pulseStrength = strength.coerceIn(0f, 1f))
         if (running) reschedule(0)
     }
 
     fun beat() = exec.execute {
         envelope = 1f
+    }
+
+    /** Latest audio levels for Energy strips (any thread, ~20-50 times a second). */
+    fun audio(l: AudioLevels) {
+        val t = now()
+        val wasStale = t - levelsAt > AUDIO_STALE_MS
+        levels = l
+        levelsAt = t
+        if (l.beat) beat()
+        if (wasStale) exec.execute { if (running) reschedule(0) } // leave the 1 s keep-alive pace now
     }
 
     /** Stop sending; WLED goes back to its own effect ~1 s later. */
@@ -453,6 +553,7 @@ class WledAmbient(private val udpPort: Int = WledPackets.UDP_PORT) {
         for (host in targets.keys.toList()) release(host)
         running = false
         envelope = 0f
+        shownLevels.fill(0f)
     }
 
     private fun reschedule(delayMs: Long) {
@@ -468,23 +569,53 @@ class WledAmbient(private val udpPort: Int = WledPackets.UDP_PORT) {
         envelope *= exp(-dt / 160f)
         val fade = ((t - fadeStart) / FADE_MS.toFloat()).coerceIn(0f, 1f)
         val eased = fade * fade * (3 - 2 * fade)
-        val factor = if (pulse) (1f - pulseStrength) + pulseStrength * envelope else 1f
+        val st = style
+        val factor = if (st.pulse) (1f - st.pulseStrength) + st.pulseStrength * envelope else 1f
+        val audioAge = t - levelsAt
+        val audioLive = audioAge <= AUDIO_STALE_MS
+        val bars = if (audioLive) smoothLevels(audioAge) else null
+        var anyEnergy = false
+        var anyPulse = false
         for ((host, target) in targets) {
-            val frame = target.frame
-            for (i in frame.indices) {
-                val c = frame[i]
+            val base = target.strip.base
+            for (i in base.indices) {
+                val c = base[i]
                 for (ch in 0..2) {
                     val v = ((c shr (16 - ch * 8)) and 0xFF).toFloat()
                     val k = i * 3 + ch
                     target.shown[k] = target.from[k] + (v - target.from[k]) * eased
                 }
             }
-            if (sender.send(listOf(host), WledPackets.dnrgb(frameOf(target, factor), 2), udpPort)) framesSent++
+            val effect = target.strip.effect
+            val frame = if (effect.energy && bars != null) {
+                anyEnergy = true
+                EnergyEffect.render(frameOf(target, 1f), target.strip.bands, bars, effect, st.energyBackground, st.energyBlur)
+            } else {
+                // Energy strips without audio show their colours steadily
+                if (!effect.energy) anyPulse = true
+                frameOf(target, if (effect.energy) 1f else factor)
+            }
+            if (sender.send(listOf(host), WledPackets.dnrgb(frame, 2), udpPort)) framesSent++
         }
-        reschedule(if (fade < 1f || pulse) FRAME_MS else KEEPALIVE_MS)
+        reschedule(
+            when {
+                anyEnergy -> ENERGY_FRAME_MS
+                fade < 1f || (st.pulse && anyPulse) -> FRAME_MS
+                else -> KEEPALIVE_MS
+            },
+        )
     }
 
-    private fun frameOf(t: Target, factor: Float): IntArray = IntArray(t.frame.size) { i ->
+    /** Glide toward the latest levels so 20 Hz audio still looks smooth at 40 fps; fade out if the feed pauses. */
+    private fun smoothLevels(ageMs: Long): AudioLevels {
+        val l = levels
+        val fall = if (ageMs > 150) exp(-(ageMs - 150) / 200f) else 1f
+        val target = floatArrayOf(l.lows * fall, l.mids * fall, l.highs * fall)
+        for (b in 0..2) shownLevels[b] += (target[b] - shownLevels[b]) * 0.6f
+        return AudioLevels(shownLevels[0], shownLevels[1], shownLevels[2])
+    }
+
+    private fun frameOf(t: Target, factor: Float): IntArray = IntArray(t.strip.base.size) { i ->
         val r = (t.shown[i * 3] * factor).roundToInt().coerceIn(0, 255)
         val g = (t.shown[i * 3 + 1] * factor).roundToInt().coerceIn(0, 255)
         val b = (t.shown[i * 3 + 2] * factor).roundToInt().coerceIn(0, 255)
@@ -496,7 +627,11 @@ class WledAmbient(private val udpPort: Int = WledPackets.UDP_PORT) {
     companion object {
         const val FADE_MS = 700L
         const val FRAME_MS = 33L
+        const val ENERGY_FRAME_MS = 25L
         const val KEEPALIVE_MS = 1000L
+
+        /** Energy strips go steady when no audio has arrived for this long. */
+        const val AUDIO_STALE_MS = 2000L
     }
 }
 
@@ -506,8 +641,22 @@ data class WledConfig(
     val restore: Boolean,
     val pulse: Boolean,
     val pulseStrength: Float,
+    val energyBackground: Float = 0.1f,
+    val energyBlur: Int = 2,
 ) {
-    val hasAmbient: Boolean get() = devices.any { it.zone is WledZone.Ambient }
+    /** Some device is driven over UDP realtime (gradient or Energy). */
+    val hasRealtime: Boolean get() = devices.any { it.realtime }
+
+    /** Beat pulse has something to pulse: a plain (non-Energy) gradient strip. */
+    val hasPulseTarget: Boolean get() = devices.any { it.zone is WledZone.Ambient && !it.effect.energy }
+
+    /** Some strip runs the Energy effect and wants audio levels. */
+    val hasEnergy: Boolean get() = devices.any { it.realtime && it.effect.energy }
+
+    /** Wants audio at all (pulse or Energy). */
+    val wantsAudio: Boolean get() = hasEnergy || (pulse && hasPulseTarget)
+
+    fun style(preview: Boolean = false) = StripStyle(pulse && !preview, pulseStrength, energyBackground, energyBlur)
 }
 
 /** Decides what to send to each WLED device for each engine event. Call from one thread. */
@@ -516,16 +665,31 @@ class WledController(udpPort: Int = WledPackets.UDP_PORT) {
 
     val ambient = WledAmbient(udpPort)
     private val saved = HashMap<String, JSONObject>()
+    private val ledCounts = HashMap<String, Int>()
     private val restoreExec = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "mls-wled-restore").apply { isDaemon = true } }
 
     fun onColors(cfg: WledConfig, palette: Palette, sessionStart: Boolean, preview: Boolean = false): Result {
-        val frames = LinkedHashMap<String, IntArray>()
-        val json = cfg.devices.filter { it.zone !is WledZone.Ambient }
+        val strips = LinkedHashMap<String, WledAmbient.Strip>()
+        val json = ArrayList<WledDevice>()
+        val notes = ArrayList<String>()
+        fun scale(c: LightColor) = scaled(c, cfg.brightness)
         for (d in cfg.devices) {
-            val z = d.zone as? WledZone.Ambient ?: continue
-            frames[d.host] = z.layout.render { slot -> scaled(palette[slot], cfg.brightness) }
+            when (val z = d.zone) {
+                is WledZone.Ambient -> strips[d.host] = WledAmbient.Strip(z.layout.render { scale(palette[it]) }, d.effect)
+                is WledZone.Section -> {
+                    val n = if (d.realtime) ledCount(d) else null
+                    if (n == null) {
+                        if (d.realtime) notes += "${d.host} LED count unknown, solid colour"
+                        json += d
+                    } else {
+                        val colour = EnergyEffect.packRgb(scale(palette[z.slot]))
+                        strips[d.host] = WledAmbient.Strip(IntArray(n) { colour }, d.effect, EnergyEffect.bandColours(palette, z.slot, ::scale))
+                    }
+                }
+                is WledZone.Palette -> json += d
+            }
         }
-        ambient.show(frames, cfg.pulse && !preview, cfg.pulseStrength, if (preview) PREVIEW_MS else 0)
+        ambient.show(strips, cfg.style(preview), if (preview) PREVIEW_MS else 0)
 
         if (json.isNotEmpty() && cfg.restore && (sessionStart || preview)) {
             synchronized(this) {
@@ -533,16 +697,24 @@ class WledController(udpPort: Int = WledPackets.UDP_PORT) {
             }
         }
         val parts = ArrayList<String>()
-        var ok = frames.isNotEmpty()
-        if (frames.isNotEmpty()) parts += "ambient x${frames.size}"
+        var ok = strips.isNotEmpty()
+        if (strips.isNotEmpty()) parts += "realtime x${strips.size}"
         for (d in json) {
             val r = WledJson.post(d.host, bodyFor(d.zone, palette, cfg.brightness))
             if (r.ok) ok = true
             parts += "${d.host} ${r.message}"
         }
+        parts += notes
         if (preview && json.isNotEmpty()) restoreExec.schedule({ restoreAll() }, PREVIEW_MS, TimeUnit.MILLISECONDS)
         return Result(ok, "WLED " + parts.joinToString(", ").ifEmpty { "no devices" })
     }
+
+    /** True while WLED states saved at session start are waiting to be put back. */
+    val hasSavedState: Boolean
+        @Synchronized get() = saved.isNotEmpty()
+
+    /** Audio levels for Energy strips. Any thread. */
+    fun audio(levels: AudioLevels) = ambient.audio(levels)
 
     fun onStopped(cfg: WledConfig): Result {
         ambient.stop()
@@ -554,6 +726,12 @@ class WledController(udpPort: Int = WledPackets.UDP_PORT) {
     fun release(restore: Boolean) {
         ambient.stop()
         if (restore) restoreAll()
+    }
+
+    private fun ledCount(d: WledDevice): Int? {
+        if (d.leds > 0) return d.leds
+        ledCounts[d.host]?.let { return it }
+        return WledJson.ledCount(d.host)?.also { ledCounts[d.host] = it }
     }
 
     @Synchronized
@@ -569,17 +747,18 @@ class WledController(udpPort: Int = WledPackets.UDP_PORT) {
         return Result(true, "WLED restored " + msgs.joinToString(", "))
     }
 
-    private fun scaled(c: LightColor, master: Float): Rgb {
-        val f = (c.brightness / 255f) * master
-        return Rgb(
-            (c.light.r * f).roundToInt().coerceIn(0, 255),
-            (c.light.g * f).roundToInt().coerceIn(0, 255),
-            (c.light.b * f).roundToInt().coerceIn(0, 255),
-        )
-    }
-
     companion object {
         const val PREVIEW_MS = 6000L
+
+        /** A light colour scaled by its own brightness and the master brightness, as sent over UDP. */
+        fun scaled(c: LightColor, master: Float): Rgb {
+            val f = (c.brightness / 255f) * master
+            return Rgb(
+                (c.light.r * f).roundToInt().coerceIn(0, 255),
+                (c.light.g * f).roundToInt().coerceIn(0, 255),
+                (c.light.b * f).roundToInt().coerceIn(0, 255),
+            )
+        }
 
         fun bodyFor(zone: WledZone, palette: Palette, master: Float): JSONObject = when (zone) {
             is WledZone.Section -> {
@@ -622,26 +801,5 @@ class BeatDetector(
         val isBeat = energy > minEnergy && energy > avg * sensitivity && nowMs - lastBeat >= minIntervalMs
         if (isBeat) lastBeat = nowMs
         return isBeat
-    }
-
-    companion object {
-        /**
-         * Bass energy (~30-160 Hz) from an Android Visualizer FFT frame
-         * ([re0, reN/2, re1, im1, re2, im2, ...], signed bytes).
-         */
-        fun bassEnergy(fft: ByteArray, samplingRateMilliHz: Int): Float {
-            val n = fft.size
-            if (n < 4 || samplingRateMilliHz <= 0) return 0f
-            val binHz = samplingRateMilliHz / 1000f / n
-            val lo = max(1, (30f / binHz).roundToInt())
-            val hi = min(n / 2 - 1, max(lo, (160f / binHz).roundToInt()))
-            var e = 0f
-            for (k in lo..hi) {
-                val re = fft[2 * k].toFloat()
-                val im = fft[2 * k + 1].toFloat()
-                e += re * re + im * im
-            }
-            return e / (hi - lo + 1) / (128f * 128f)
-        }
     }
 }

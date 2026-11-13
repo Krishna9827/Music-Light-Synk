@@ -12,8 +12,8 @@ android {
         // Fire OS 6 (API 25) and newer: every Fire TV Stick 4K / 4K Max, Fire TV Cube, Android TV boxes.
         minSdk = 25
         targetSdk = 34
-        versionCode = 5
-        versionName = "0.5.0"
+        versionCode = 6
+        versionName = "0.6.0"
     }
 
     signingConfigs {

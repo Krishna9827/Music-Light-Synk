@@ -1,6 +1,7 @@
 # Music Light Synk
 
-Your lights take on the colours of the album art playing on your **Fire TV / Android TV**.
+Your lights take on the colours of the album art playing on your **Fire TV / Android TV**, and
+WLED strips can **bounce to the beat** (like LedFx's Energy effect, without LedFx).
 
 A small TV app reads the album art of whatever is playing (Spotify, Amazon Music, Apple Music,
 YouTube, ...), extracts **4 corner + 4 side colours** (plus dominant / vibrant / average), and sends
@@ -10,7 +11,13 @@ them **once per track change** to any mix of:
   lights in the UI, done) or a blueprint if you prefer automations,
 - **WLED directly** over your LAN (instant, skips Home Assistant): as many WLEDs as you like,
   each showing its own part of the artwork (a corner, a side, dominant, ...), WLED's own effects in
-  album colours, or an ambient gradient around the TV that can **pulse to the beat**.
+  album colours, or an ambient gradient around the TV. Any strip can run the **Energy** effect:
+  bars for lows / mids / highs bounce with the music, with LedFx-style **flip** and **mirror**.
+
+The same app runs on an **Android phone**. Phone and TV find each other on the Wi-Fi, share
+colours and the beat, and take turns driving the WLED strips. The phone can be a **backup
+listener**: its mic hears music played anywhere else (an iPhone, a PC on the speakers) and keeps
+the strips moving to the beat.
 
 No Raspberry Pi, no HDMI grabber, and no continuous colour stream, so slow cloud bulbs like Tuya
 keep up.
@@ -197,6 +204,62 @@ adb shell am broadcast -n com.musiclightsynk/.AdbCommandReceiver -a com.musiclig
   --ez pulse true --ei pulse_strength 60
 ```
 
+### Energy: strips that bounce to the music
+
+Like LedFx's *Energy* effect, built into the app: bars for **lows, mids and highs** grow along
+the strip with the music, ~40 times a second over UDP. Turn it on per WLED device (*Energy: ON*
+in the app, or `:energy` in the device list), then pick the direction with the same two switches
+as LedFx:
+
+| Flip | Mirror | Bars grow | e.g. |
+|---|---|---|---|
+| off | off | from LED 0 to the end | standing bar with LED 0 at the bottom |
+| on | off | from the last LED back to LED 0 | standing bar with LED 0 at the top |
+| off | on | from the middle out to both ends | |
+| on | on | from both ends toward the middle | TV backlight, "bounces from both sides" |
+
+- On a **section** zone (`dominant`, `left`, ...) the three bars use three album colours: the
+  zone's own colour for lows, the vibrant colour for mids and a contrasting one for highs. The
+  app reads the LED count from WLED (`/json/info`); add `:leds=60` to set it by hand.
+- On an **ambient** strip the bars bounce in the gradient's own colours, so each part of the
+  strip keeps its place in the artwork.
+- *Beat & audio* settings: **Sensitivity** (how far the bars reach), **Blur** (soft edges),
+  **Background brightness** (how much of the colour stays lit where no bar is).
+- No audio for 2 s (paused, permission off, silent source): the strip shows its colours steadily.
+
+```bash
+# standing bar (bottom up) and the TV backlight (both ends inward)
+adb shell am broadcast -n com.musiclightsynk/.AdbCommandReceiver -a com.musiclightsynk.CONFIGURE \
+  --es wled_devices '192.168.1.64=dominant:energy; 192.168.1.60=ambient:40,22,40,22:bottom_left:cw:energy:flip:mirror' \
+  --ei energy_sensitivity 100 --ei energy_blur 2 --ei energy_bg 10
+```
+
+Where the audio comes from (`audio_source`): **auto** (device audio, else the microphone),
+**output** (what the device plays, Android's `Visualizer`), **mic**, or **off**. On the Fire TV
+that is the TV's own audio. With HDMI passthrough, where Android never sees the audio, a phone
+running the app as backup listener sends its mic levels to the TV instead (next section).
+
+### Phone and device link
+
+Install the same APK on an Android phone (download it on the phone from
+[Releases](https://github.com/Krishna9827/Music-Light-Synk/releases/latest), allow the install,
+open it, then *Grant media access*). Everything the TV app does, the phone app does too, with
+a one-column layout.
+
+**Device link** (on by default): apps on the same Wi-Fi find each other (UDP port 21330, no
+server, no Home Assistant) and
+- share the **WLED device list**: edit it on any device and the others follow (newest edit wins),
+- share the **beat**: a device that can't hear the music uses another device's levels,
+- take turns **driving the WLED strips**, so two devices never fight over them: a device playing
+  music wins over a listening one, and between two players, the one that started last wins.
+
+**Backup listener** (phones, *Other devices* card): keeps the mic on (with a notification) and,
+when it hears music for a few seconds that no other app device is playing, drives the strips to
+the beat in the last album's colours (or the colours a playing device shares). It hands over as
+soon as the TV or another device starts playing, and lets go after the stop delay of quiet. Android
+only lets an app use the mic in the background if it was started while on screen, so after a
+phone reboot, open the app once.
+
 ### Home Assistant integration
 
 Installed via HACS (step 4 above). Each TV is one device with:
@@ -210,6 +273,8 @@ Installed via HACS (step 4 above). Each TV is one device with:
 | `sensor.<tv>_top_left_colour` … (11) | State = hex colour; attributes `hs`, `rgb`, `brightness`, `raw_hex`, … |
 | `sensor.<tv>_now_playing` | Title or `idle`, with app/artist/album attributes |
 | `binary_sensor.<tv>_playing` | On while music plays |
+| `sensor.<tv>_audio` | What the app listens to: **Device audio**, **Microphone** or **Not listening** |
+| `sensor.<tv>_wled_driven_by` | Which device drives the WLED strips (*This device*, another device's name, or *Nobody*); attribute `linked_devices` |
 
 **Control the TV app from Home Assistant.** HA's
 [Android Debug Bridge](https://www.home-assistant.io/integrations/androidtv/) integration can run
@@ -221,8 +286,9 @@ commands on the Fire TV. Pick that Fire TV entity in the setup wizard's last ste
 | `select.<tv>_colour_source_mode` | **Auto** (album art, screen if none) / **Album art (media access)** / **Screen capture** |
 | `switch.<tv>_screen_capture` | Start / stop screen capture |
 | `switch.<tv>_tv_syncing`, `_beat_pulse` | Pause the whole app; beat pulse for ambient WLED strips |
-| Configuration: switches | WLED output, restore WLED on stop, restart capture after reboot, MQTT output |
-| Configuration: numbers | Edge / corner size, saturation boost, minimum brightness, screen re-sample interval, stop delay, WLED brightness, pulse strength |
+| `select.<tv>_audio_source` | What Energy strips and the pulse listen to: **Auto** / **Device audio** / **Microphone** / **Off** |
+| Configuration: switches | WLED output, restore WLED on stop, restart capture after reboot, MQTT output, device link |
+| Configuration: numbers | Edge / corner size, saturation boost, minimum brightness, screen re-sample interval, stop delay, WLED brightness, pulse strength, Energy sensitivity / blur / background brightness |
 | Configuration: text | **WLED devices** (see [WLED direct](#wled-direct-skips-home-assistant)), **Per-app profiles** |
 | Configuration: buttons | **Grant TV permissions** (media access + screen capture without a prompt), **Refresh TV app status**, **Send test colours from TV** |
 
@@ -276,6 +342,12 @@ The settings screen works with the remote's D-pad. Every setting can also be set
 | WLED brightness | `wled_brightness_pct` | 100 | Scales everything sent to WLED |
 | Restore WLED on stop | `wled_restore` | on | JSON (section / palette) devices |
 | Beat pulse | `pulse`, `pulse_strength` | off, 60 % | Ambient strips, needs audio permission |
+| Audio source | `audio_source` | `auto` | `auto` / `output` / `mic` / `off`, for Energy strips, the pulse and other devices |
+| Energy sensitivity | `energy_sensitivity` | 100 % | 10–300. Higher = bars reach further |
+| Energy blur | `energy_blur` | 2 | 0–10 smoothing passes across neighbouring LEDs |
+| Energy background | `energy_bg` | 10 % | Brightness of the strip's colour where no bar is |
+| Device link | `link_enabled` | on | Share colours / beat / WLED list with the app on other devices |
+| Device name | `device_name` | model | Shown on other devices |
 
 ### ADB cheat sheet
 
@@ -378,7 +450,10 @@ The app already sends at most one update per track. The rest of the lag is Tuya'
 | Lights restore while music is playing | Raise "Send 'stopped' after" (some apps briefly pause between tracks) |
 | `MQTT broker refused connection: bad username or password` | Check `mqtt_user` / `mqtt_pass` (the app doesn't retry a refused login) |
 | WLED ambient does nothing | Check the layout is valid (`STATUS` shows it) and *Receive UDP realtime* is on in WLED |
-| "Beat pulse hears silence" | The device or app blocks audio analysis, or HDMI passthrough is on. Use PCM/stereo output to test |
+| "Device audio is silent" | The device or app blocks audio analysis, or HDMI passthrough is on. Use PCM/stereo output to test, or let a phone's backup listener send the beat |
+| Energy strip shows still colours | No audio for 2 s: check *Beat & audio* says *Hearing: ...*, and that the app has audio permission |
+| Devices don't find each other | Same Wi-Fi? Routers with "AP / client isolation" or a guest network block it. UDP port 21330 must be allowed between them |
+| Two devices fight over the strips | Update both to the same version (they elect one driver); or turn the device link off on one and remove its WLED devices |
 | Integration says the webhook ID is in use | The blueprint automation holds it. Delete that automation first, or use another ID (e.g. `music_light_synk_entities`) and add it to the app |
 
 ## How it's built
@@ -398,19 +473,30 @@ The app already sends at most one update per track. The rest of the lag is Tuya'
 - `Mqtt.kt`: a ~250-line MQTT 3.1.1 publisher (QoS 0, retain, last will, keep-alive) plus
   Home Assistant discovery. No library.
 - `Wled.kt`: strip layout → per-LED gradient, DNRGB packets, a renderer thread (~30 fps while
-  fading or pulsing, 1 Hz keep-alive otherwise), the JSON API with save/restore, and the beat
-  detector (bass energy vs. a moving average).
-- `AudioPulse`: Android `Visualizer` on the output mix → beat detector → WLED renderer.
+  fading or pulsing, ~40 fps for Energy bars, 1 Hz keep-alive otherwise), the JSON API with
+  save/restore, and the beat detector (bass energy vs. a moving average).
+- `AudioAnalysis.kt` / `EnergyEffect.kt`: our own FFT → lows / mids / highs, an auto-gain meter
+  (quiet and loud sources both use the full range; silence stays dark), and the bar renderer with
+  LedFx's flip / mirror. Pure Kotlin, unit tested.
+- `AudioEngine`: Android `Visualizer` waveform (device audio) or `AudioRecord` (mic) → meter.
+- `Link.kt`: the device link (JSON over UDP, broadcast discovery, unicast after that) and the
+  election of which device drives WLED. `ListenerService` is the phone's mic foreground service.
 - Everything is plain Android framework code (no AndroidX, no libraries), minSdk 25 (Fire OS 6+),
   targetSdk 34. MQTT, WLED, colour extraction and payloads are framework-free Kotlin, so they
   are unit tested on the JVM.
 
 ## Testing
 
-- `./gradlew testReleaseUnitTest`: 37 JVM tests. Colour extraction, payload schema, per-app
+- `./gradlew testReleaseUnitTest`: 66 JVM tests. Colour extraction, payload schema, per-app
   profiles, MQTT packets against a fake broker (connect, auth refusal, retained topics,
   discovery), WLED layout orientation, DNRGB packets, the UDP renderer (fade in, stop, silence
   after stop), the JSON save → set → restore flow against a fake WLED, and beat detection.
+  For Energy: FFT bins and band split, the meter (kicks push the bars up, they fall back, a quiet
+  mic still uses the full range, silence goes dark), flip / mirror in all four combinations,
+  the device-list options, and an Energy strip over real UDP with its LED count from a fake
+  WLED's `/json/info`. For the link: every message round-trips, strangers and junk are ignored,
+  the election rules (player beats listener, newest player wins, ties, expiry), and two link
+  sockets finding each other and talking.
 - CI (`.github/workflows/build.yml`) builds the signed APK, checks both blueprints, checks the
   MQTT blueprint is regenerated (`scripts/build_blueprints.py --check`) and byte-compiles the integration.
   `validate.yml` runs Home Assistant's **hassfest** and the **HACS** validator.
@@ -442,9 +528,10 @@ The app already sends at most one update per track. The rest of the lag is Tuya'
   control sent the right command; values with `;`, `=` and spaces arrived intact; and the
   app's status reply updated every entity. Without an ADB entity the controls are unavailable,
   not broken.
-- Not covered by these tests: anything that needs the physical TV or a real WLED. That includes
-  whether the Fire TV `Visualizer` returns real audio, and the UDP/JSON packets on actual WLED
-  firmware (they follow the documented protocols).
+- Not covered by these tests: anything that needs the physical TV, a phone or a real WLED. That
+  includes whether the Fire TV `Visualizer` returns real audio, how the bars feel with real music,
+  the phone mic in the background, the link across a real router, and the UDP/JSON packets on
+  actual WLED firmware (they follow the documented protocols).
 
 ## Ideas for later
 

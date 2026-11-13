@@ -4,6 +4,30 @@ One version number for the whole project: the TV app (APK) and the Home Assistan
 integration are released together. Every release on GitHub has the APK, the integration zip
 and both blueprints attached.
 
+## v0.6.0
+
+**App (Fire TV and Android phones)**
+- **Energy effect** for WLED strips, like LedFx's: bars for lows / mids / highs bounce with the
+  music, in album colours, at ~40 fps. Per device, with LedFx's **Flip** and **Mirror**
+  switches (standing bar from the bottom; TV backlight from both ends). Settings for
+  sensitivity, blur and background brightness. No LedFx needed.
+- **Audio source**: device audio (what the TV plays), the microphone, or auto (device audio,
+  else mic). Our own FFT on the audio, with auto-gain so quiet and loud sources both work.
+- **Phone app**: the same APK runs on Android phones, with a one-column layout.
+- **Device link**: apps on the same Wi-Fi find each other, share the WLED device list (edit it
+  anywhere), share the beat, and take turns driving the strips: a device playing music wins over
+  a listening one, the most recent player wins between two.
+- **Backup listener** (phones): the phone's mic hears music played elsewhere (iPhone, PC) and
+  keeps the strips moving to the beat in the last album's colours; it hands over as soon as a
+  device plays music itself. It can also send the beat to a TV whose audio is silent (HDMI
+  passthrough).
+- The beat pulse now uses the same audio engine (and works from the mic too).
+
+**Home Assistant integration**
+- New: **Audio source** select, **Energy sensitivity / blur / background brightness** numbers,
+  **Device link** switch, **Audio** sensor (device audio / microphone / not listening) and
+  **WLED driven by** sensor (with the linked devices).
+
 ## v0.5.0
 
 **TV app**

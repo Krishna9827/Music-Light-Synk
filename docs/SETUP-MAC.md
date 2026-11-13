@@ -180,6 +180,9 @@ Everything is on the TV's device page. Controls marked *(Fire TV)* need step 7.
 | Pause everything | **TV syncing** switch *(Fire TV)* (the app) or **Light sync** switch (only HA's lights) |
 | Beat pulse for WLED ambient strips *(Fire TV)* | **Beat pulse** switch, **Pulse strength** number |
 | WLED devices and what each one shows *(Fire TV)* | **WLED devices** text (format below), **WLED output**, **WLED brightness** |
+| Energy (bars to the beat) *(Fire TV)* | `:energy`, `:flip`, `:mirror` in **WLED devices**; **Energy sensitivity**, **Energy blur**, **Energy background brightness** numbers |
+| What the app listens to | **Audio** sensor; change it with **Audio source** *(Fire TV)*: Auto / Device audio / Microphone / Off |
+| Phone ↔ TV link | **WLED driven by** sensor (attribute `linked_devices`), **Device link** switch *(Fire TV)* |
 | Per-app profiles *(Fire TV)* | **Per-app profiles** text, e.g. `com.google.android.youtube.tv=screen;com.netflix.ninja=off` |
 | Edge size, saturation, minimum brightness, re-sample interval, stop delay *(Fire TV)* | Numbers under *Configuration* |
 | Fix permissions *(Fire TV)* | **Grant TV permissions** button |
@@ -198,9 +201,59 @@ on each side, and a shelf running its own effect in album colours:
 Zones: any corner or side (`top_left`, `top`, `right`, …), `dominant`, `vibrant`, `average`,
 `palette` (WLED's own effect in album colours), or `ambient` (gradient strip: LED counts
 top,right,bottom,left, then where LED 0 is, then `cw`/`ccw`). Add `:keep` to a corner/side zone
-to keep the WLED's current effect. On the TV the same list is under **WLED devices** (Add →
-press the zone button to cycle). If a WLED is also one of your Home Assistant light zones,
-remove it there so the two don't fight.
+to keep the WLED's current effect. Add `:energy` to make a corner/side or ambient strip bounce to
+the music, plus `:flip` and/or `:mirror` for the direction (Part C). On the TV the same list is
+under **WLED devices** (Add → press the zone button to cycle). If a WLED is also one of your
+Home Assistant light zones, remove it there so the two don't fight.
+
+---
+
+## Part C (optional): strips that bounce to the beat, and the phone
+
+### 10. Energy effect on a WLED strip
+
+On the TV app, under **WLED devices**, each device has **Energy / Flip / Mirror** buttons:
+
+1. Press **Energy: ON**. The app asks for audio access once: accept. (Or from the Mac:
+   `adb shell pm grant com.musiclightsynk android.permission.RECORD_AUDIO`.)
+2. Pick the direction. These are the same switches as in LedFx, so use what you had there:
+
+   | Flip | Mirror | Bars grow | Use for |
+   |---|---|---|---|
+   | off | off | from LED 0 | standing bar with LED 0 at the bottom |
+   | on | off | from the last LED | standing bar with LED 0 at the top |
+   | off | on | from the middle outward | |
+   | on | on | from both ends inward | TV backlight ("bounces from both sides") |
+
+3. Play music. *Beat & audio* shows **Hearing: device audio**. Tune **Sensitivity** (how far the
+   bars reach: start at 100 %, lower it if the bars hit the end all the time), **Blur** and
+   **Background brightness**.
+
+A corner/side zone (e.g. `dominant`) bounces in three album colours (lows / mids / highs). An
+ambient strip bounces in its own gradient. The same from Home Assistant, in **WLED devices**:
+
+```
+192.168.1.64=dominant:energy; 192.168.1.60=ambient:40,22,40,22:bottom_left:cw:energy:flip:mirror
+```
+
+> **Soundbar with Dolby / DTS (HDMI passthrough)?** Android never sees that audio, so the TV
+> hears silence. Use the phone as backup listener (step 11): it sends the beat to the TV.
+
+### 11. The phone (Android)
+
+1. On the phone, open https://github.com/Krishna9827/Music-Light-Synk/releases/latest and tap
+   **music-light-synk.apk**. Allow the browser to install apps when asked, then **Install**.
+2. Open **Music Light Synk** → *Status & permissions* → **Grant media access** → turn on
+   *Music Light Synk* in the list (this lets it see what the phone plays).
+3. Keep the phone on the same Wi-Fi as the TV. Under *Other devices* it shows
+   **Found: (your Fire TV)** within a few seconds, and the **WLED devices** list copies itself
+   over from the TV. Edit it on either device; the other follows.
+4. **Backup listener (mic): ON**, then allow the microphone and notifications. Leave the phone
+   near the speakers. When music plays that no app device is playing (iPhone, Mac or PC on the
+   2.1 speakers), the strips bounce after a few seconds, in the last album's colours. As soon as
+   the TV (or the phone itself) plays music, that device takes over.
+
+After a phone restart, open the app once so Android lets the listener use the mic again.
 
 ---
 
@@ -216,6 +269,8 @@ Look at the TV's device page first:
 | *Now playing* never updates | The TV can't reach HA: wrong HA IP/port in step 6, or the webhook IDs don't match |
 | TV controls are *unavailable* | No Fire TV picked under *Configure → TV app control*, or the Android Debug Bridge entity is unavailable (see the note in step 7) |
 | An app shows *did not provide album art* | That app doesn't share artwork. Set **Colour source mode** to *Auto* and turn on **Screen capture** |
+| Energy strip shows still colours | **Audio** says *Not listening* or the TV hears silence: grant audio access (step 10), or HDMI passthrough is on (use the phone, step 11) |
+| Phone doesn't find the TV | Same Wi-Fi, not a guest network, and no "AP / client isolation" on the router. **Device link** on on both |
 
 From the Mac, the app's own summary:
 ```bash
@@ -236,6 +291,9 @@ And a live log: `adb logcat -s MusicLightSynk` (Ctrl+C to stop).
    ```
 2. **Integration:** HACS shows an update. Click **Update**, then restart HA. Settings are kept.
    (Blueprint users: re-import the blueprint, then *Developer tools → YAML → Reload automations*.)
+
+**Coming from v0.5:** nothing to redo. Install the new APK and update the integration; the new
+controls appear by themselves. Part C sets up the Energy effect and the phone.
 
 **Coming from v0.4 or older:** do step 7 (Android Debug Bridge) if you haven't, then open
 Music Light Synk → **Configure → TV app control** and pick the Fire TV. The device page then gets
@@ -262,6 +320,11 @@ adb shell am broadcast $R --es profiles 'com.google.android.youtube.tv=screen;co
 # beat pulse (ambient WLED strips; needs audio permission once)
 adb shell pm grant com.musiclightsynk android.permission.RECORD_AUDIO
 adb shell am broadcast $R --ez pulse true --ei pulse_strength 60
+# Energy: a strip bouncing from both ends, and how it looks
+adb shell am broadcast $R --es wled_devices '192.168.1.60=ambient:40,22,40,22:bottom_left:cw:energy:flip:mirror'
+adb shell am broadcast $R --ei energy_sensitivity 100 --ei energy_blur 2 --ei energy_bg 10
+# audio source: auto | output | mic | off
+adb shell am broadcast $R --es audio_source auto
 # start / stop screen capture
 adb shell am start -n com.musiclightsynk/.CaptureConsentActivity
 adb shell am broadcast -f 0x20 -n com.musiclightsynk/.AdbCommandReceiver -a com.musiclightsynk.STOP_CAPTURE
