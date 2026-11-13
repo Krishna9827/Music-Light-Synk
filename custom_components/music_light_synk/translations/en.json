@@ -33,10 +33,10 @@
         }
       },
       "tv": {
-        "title": "Control the TV app from Home Assistant (optional)",
-        "description": "Pick your Fire TV / Android TV entity from Home Assistant's Android Debug Bridge integration. Then the device gets controls for the colour source (album art or screen capture), screen capture, WLED, and every other TV app setting. Skip this if you don't use the Android Debug Bridge integration.",
+        "title": "Fire TV over ADB (optional)",
+        "description": "Phones and the Fire TV are controlled over Wi-Fi automatically once the app has sent its first update (nothing to pick here). Only pick your Fire TV's Android Debug Bridge entity if you also want the 'Grant TV permissions' button, or as a fallback when Wi-Fi control is off.",
         "data": {
-          "adb_entity": "Fire TV (Android Debug Bridge)"
+          "adb_entity": "Fire TV (Android Debug Bridge, optional)"
         }
       }
     },
@@ -110,10 +110,10 @@
             }
           },
           "tv": {
-            "name": "TV app control",
-            "description": "The Fire TV / Android TV entity from the Android Debug Bridge integration. Used to change the TV app's settings from Home Assistant.",
+            "name": "App control",
+            "description": "The app is controlled over Wi-Fi automatically (phones and TVs). Optionally pick the Fire TV's Android Debug Bridge entity for the 'Grant TV permissions' button and as a fallback.",
             "data": {
-              "adb_entity": "Fire TV (Android Debug Bridge)"
+              "adb_entity": "Fire TV (Android Debug Bridge, optional)"
             }
           }
         }
@@ -170,7 +170,6 @@
       },
       "audio_source": {
         "state": {
-          "auto": "Auto: device audio, else microphone",
           "output": "Device audio",
           "mic": "Microphone",
           "off": "Off"

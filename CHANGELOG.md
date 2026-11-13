@@ -4,6 +4,29 @@ One version number for the whole project: the TV app (APK) and the Home Assistan
 integration are released together. Every release on GitHub has the APK, the integration zip
 and both blueprints attached.
 
+## v0.7.0
+
+**Fixes from testing v0.6**
+- **No more lag**: the WLEDs get the colours the moment they're known. Home Assistant and MQTT now
+  send on their own thread, so a slow or unreachable server can't delay the lights any more (it
+  could add 30+ seconds before). WLEDs on the JSON API are updated in parallel.
+- **Audio source stays where you put it**: Device audio, Microphone or Off. "Auto" is gone, and
+  nothing switches it by itself any more. Defaults: device audio on a TV, microphone on a phone.
+  The backup listener uses the microphone.
+- **Screen sampling** looks again 1.2 s and 3.5 s after a track change (apps animate the new
+  cover in, so the first look often still showed the old one).
+- Flip and Mirror can be set before Energy is switched on.
+
+**Phones are independent**
+- Every device keeps **its own WLED list** (v0.6 copied one list to every device).
+- Devices only take turns on a **WLED they both list**; a phone in another room with other lights
+  never gives way to the TV. The beat and album colours are shared only within the same **Room**
+  (new setting).
+- **Home Assistant controls the app over Wi-Fi**, no ADB or Fire TV needed: the app runs a small
+  control API (port 21331, secret token) and tells the integration where it is. Add the phone as
+  its own device in HA (its own webhook ID) and every control works. ADB is now optional
+  (needed only for *Grant TV permissions*).
+
 ## v0.6.0
 
 **App (Fire TV and Android phones)**

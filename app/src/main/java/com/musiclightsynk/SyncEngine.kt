@@ -1,7 +1,6 @@
 package com.musiclightsynk
 
 import android.content.Context
-import android.content.pm.PackageManager
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
@@ -9,6 +8,7 @@ import android.os.HandlerThread
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -18,12 +18,15 @@ import java.util.concurrent.CopyOnWriteArraySet
 /**
  * The brain. Decides *when* to send colours so the lights get one command per change
  * (new track / new artwork) instead of a continuous stream - which is what makes cloud
- * bulbs like Tuya lag. Then fans each update out to every configured output:
- * Home Assistant webhook(s), MQTT, and WLED directly.
+ * bulbs like Tuya lag. Then fans each update out to every configured output.
  *
- * WLED strips can also bounce with the music (Energy effect): audio comes from this device
- * ([AudioEngine]) or from another device on the [Link], and only one device drives the strips at
- * a time ([LightHub]): the one playing music, else a phone listening as backup.
+ * Lights first: WLED is driven straight from the engine thread the moment the colours are known.
+ * Home Assistant and MQTT run on their own network thread, so a slow or unreachable server can
+ * never hold the lights up.
+ *
+ * Every device has its own WLED list. With the device link on, devices that list the same WLED
+ * take turns on it ([LightHub], per WLED host), and devices in the same room share the beat and
+ * the album colours (a phone's mic can feed a TV that can't hear its own audio).
  *
  * All state below is only touched on the engine thread unless marked otherwise.
  */
@@ -41,6 +44,10 @@ object SyncEngine {
     private const val HELLO_MS = 3000L
     private const val HUB_START_MS = 3000L
     private const val PEER_PAL_TTL_MS = 10_000L
+    private const val STATUS_MIN_INTERVAL_MS = 3000L
+
+    /** After a track change in screen mode, look again: apps animate the new cover in. */
+    private val SCREEN_FOLLOW_UPS_MS = longArrayOf(1200L, 3500L)
 
     data class Status(
         val nowPlaying: String = "Nothing playing",
@@ -51,15 +58,19 @@ object SyncEngine {
         val note: String? = null,
         /** "output" / "mic" while listening to music, else null. */
         val audio: String? = null,
-        /** Names of the other devices running the app. */
+        /** Names of the other devices running the app (with their room). */
         val peers: List<String> = emptyList(),
-        /** Who drives the WLED strips: "This device", another device's name, or null. */
+        /** Who drives this device's WLED strips: "This device", another device's name, or null. */
         val renderer: String? = null,
         val listening: Boolean = false,
+        /** Where Home Assistant can reach this app over Wi-Fi, e.g. http://192.168.1.23:21331. */
+        val controlUrl: String? = null,
     )
 
     private val thread = HandlerThread("mls-engine").apply { start() }
     private val handler = Handler(thread.looper)
+    private val netThread = HandlerThread("mls-net").apply { start() }
+    private val net = Handler(netThread.looper)
     private val main = Handler(Looper.getMainLooper())
     private val listeners = CopyOnWriteArraySet<Runnable>()
     private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.US)
@@ -79,10 +90,8 @@ object SyncEngine {
     private var artCacheKey: String? = null
     private var artCachePalette: Palette? = null
 
-    private val mqtt = MqttBridge()
     private val wled = WledController()
     private var lastWledCfg: WledConfig? = null
-    private var lastStatusJson: String? = null
 
     /** Main thread only (start/stop). */
     private val audio = AudioEngine(
@@ -104,15 +113,20 @@ object SyncEngine {
     @Volatile
     private var link: Link? = null
     private var hub = LightHub("")
+
+    @Volatile
     private var selfId = ""
+
+    @Volatile
+    private var room = "Home"
     private var multicastLock: WifiManager.MulticastLock? = null
     private var heartbeatScheduled = false
     private var lastHiAt = 0L
     private var lastPalAt = 0L
 
-    // who drives WLED
-    private var rendering = false
-    private var renderPrio = 0
+    // which of this device's WLEDs it drives right now (normalised hosts), and why
+    private var driven: Set<String> = emptySet()
+    private var drivenPrio = 0
     private var playingSince = 0L
     private var listenerActive = false
     private var soundSince = 0L
@@ -120,14 +134,28 @@ object SyncEngine {
     private var peerPalAt = 0L
     private var lastPalette: Palette? = null
     private var hubShown: Palette? = null
-    private val heartbeat = Runnable { onHeartbeat() }
+
+    // Home Assistant control over Wi-Fi
+    private var control: ControlServer? = null
+    private var controlUrl: String? = null
+    private var lastAddrCheck = 0L
+
+    // network thread only
+    private val mqtt = MqttBridge()
+    private var haNeedsSessionStart = false
+    private var pendingStatus: PendingStatus? = null
+    private var lastStatusAt = 0L
+    private var lastStatusJson: String? = null // engine thread
 
     private val stopTask = Runnable { onStopTimeout() }
     private val pollTask = Runnable { onPoll() }
+    private val screenFollowUp = Runnable { onScreenFollowUp() }
+    private val heartbeat = Runnable { onHeartbeat() }
+    private val statusTask = Runnable { flushStatus() }
     private val mqttKeepAlive = object : Runnable {
         override fun run() {
             mqtt.keepAlive()
-            if (mqtt.isConnected) handler.postDelayed(this, MQTT_KEEPALIVE_MS)
+            if (mqtt.isConnected) net.postDelayed(this, MQTT_KEEPALIVE_MS)
         }
     }
 
@@ -162,9 +190,9 @@ object SyncEngine {
             listenerActive = active
             soundSince = 0L
             val prefs = Prefs(app)
-            ensureLink(app, prefs)
+            ensureServices(app, prefs)
             updateAudio(app, prefs)
-            updateRendering(prefs)
+            reevaluateWled(prefs)
             setStatus(status.copy(listening = active))
         }
     }
@@ -178,7 +206,7 @@ object SyncEngine {
         handler.post {
             appCtx = app
             val prefs = Prefs(app)
-            ensureLink(app, prefs)
+            ensureServices(app, prefs)
             sendStatus(app, prefs, force)
         }
     }
@@ -190,24 +218,23 @@ object SyncEngine {
             appCtx = app
             val prefs = Prefs(app)
             artCacheKey = null
-            if (!prefs.isMqttConfigured) mqtt.close()
+            if (!prefs.isMqttConfigured) net.post { mqtt.close() }
             if (!prefs.isWledConfigured) releaseWled()
-            ensureLink(app, prefs)
+            ensureServices(app, prefs)
+            main.post { audio.resetFailures() }
             sendStatus(app, prefs, force = false)
-            if (!prefs.enabled) {
-                handler.removeCallbacks(pollTask)
-                updateAudio(app, prefs)
-                updateRendering(prefs)
-                return@post
-            }
-            val np = current
-            if (np != null && np.playing && prefs.profileFor(np.packageName) != AppProfile.OFF) {
-                process(app, prefs, np, trackChanged = true, force = true)
-                schedulePoll(prefs, np)
-            }
             hubShown = null // re-send the hub's colours with the new settings
+            if (prefs.enabled) {
+                val np = current
+                if (np != null && np.playing && prefs.profileFor(np.packageName) != AppProfile.OFF) {
+                    process(app, prefs, np, trackChanged = true, force = true)
+                    schedulePoll(prefs, np)
+                }
+            } else {
+                handler.removeCallbacks(pollTask)
+            }
             updateAudio(app, prefs)
-            updateRendering(prefs)
+            reevaluateWled(prefs)
         }
     }
 
@@ -215,30 +242,30 @@ object SyncEngine {
     fun sendTest(ctx: Context, done: ((String) -> Unit)? = null) {
         val app = ctx.applicationContext
         handler.post {
+            appCtx = app
             val prefs = Prefs(app)
             val palette = ColorExtractor.testPalette(prefs.extractOptions())
             val json = withStatus(app, prefs, Payloads.colors("test", "test", false, "test", current, palette, device))
             // Idle: WLED shows the test for a few seconds, then goes back to what it was doing.
             // During music: show the test, then put the music colours back.
-            val r = deliver(prefs, json, palette, sessionStart = false, preview = !sessionActive)
+            val msg = "Test colours -> " + deliver(prefs, json, palette, sessionStart = false, preview = !sessionActive, label = "Test colours")
             if (sessionActive) {
                 handler.postDelayed({
                     val np = current
                     if (np != null && np.playing && sessionActive) process(app, Prefs(app), np, trackChanged = false, force = true)
                 }, WledController.PREVIEW_MS)
             }
-            val msg = "Test colours -> ${r.message}"
             setStatus(status.copy(lastResult = stamp(msg), palette = palette, source = "test"))
             if (done != null) main.post { done(msg) }
         }
     }
 
-    // ---- engine thread -----------------------------------------------------------------------
+    // ---- engine thread: what's playing ---------------------------------------------------------
 
     private fun handleNowPlaying(ctx: Context, np: NowPlaying?) {
         val prefs = Prefs(ctx)
         current = np
-        ensureLink(ctx, prefs)
+        ensureServices(ctx, prefs)
         setStatus(status.copy(nowPlaying = np?.describe() ?: "Nothing playing", nowPackage = np?.packageName))
         if (!prefs.enabled) {
             handler.removeCallbacks(pollTask)
@@ -248,11 +275,12 @@ object SyncEngine {
 
         if (np == null || !np.playing) {
             handler.removeCallbacks(pollTask)
-            updateAudio(ctx, prefs)
+            handler.removeCallbacks(screenFollowUp)
             if (sessionActive && !stopScheduled) {
                 stopScheduled = true
                 handler.postDelayed(stopTask, prefs.stopDelaySec * 1000L)
             }
+            updateAudio(ctx, prefs)
             return
         }
 
@@ -283,13 +311,16 @@ object SyncEngine {
             if (!(trackChanged || force || !sessionActive || lastSource != SRC_SCREEN)) return
             palette = screenPalette(opts)
             if (palette != null) source = SRC_SCREEN
+            // Right after a track change the screen often still shows the old cover (apps
+            // animate the new one in), or nothing new was drawn yet: look again shortly.
+            if (trackChanged || force) scheduleScreenFollowUps()
         }
 
         if (palette == null || source == null) {
             val why = when {
                 mode == SourceMode.ARTWORK -> "${np.appLabel} did not provide album art"
                 ScreenCaptureService.instance == null -> "no album art and screen capture is off"
-                else -> "no album art and the screen is black (DRM/protected video?)"
+                else -> "no album art and the screen gave no picture yet (or it's DRM-protected video)"
             }
             setStatus(status.copy(lastResult = stamp("No colours: $why")))
             return
@@ -299,23 +330,27 @@ object SyncEngine {
 
     private fun sendPalette(prefs: Prefs, np: NowPlaying, palette: Palette, source: String, reason: String, force: Boolean) {
         lastSource = source
+        lastPalette = palette
+        if (!prefs.hasOutput) {
+            setStatus(status.copy(palette = palette, source = source, lastResult = stamp("Not sent: set up WLED, Home Assistant or MQTT first")))
+            return
+        }
         val sessionStart = !sessionActive
         if (sessionStart) playingSince = SystemClock.elapsedRealtime()
-        lastPalette = palette
         if (!force && !sessionStart && palette.maxDistanceTo(lastSent) < CHANGE_THRESHOLD) {
             // Lights already show these colours - don't spam slow bulbs with a duplicate command.
             setStatus(status.copy(palette = palette, source = source))
             return
         }
+        lastSent = palette
+        sessionActive = true
+        val label = "Sent $source colours"
         val json = withStatus(ctxOrNull(), prefs, Payloads.colors("colors", reason, sessionStart, source, np, palette, device))
-        val r = deliver(prefs, json, palette, sessionStart, preview = false)
-        if (r.ok) {
-            lastSent = palette
-            sessionActive = true
-        }
+        val msg = deliver(prefs, json, palette, sessionStart, preview = false, label = label)
         sendPal(np, palette, playing = true)
-        Log.i(TAG, "colors ($source/$reason) -> ${r.message}: $palette")
-        setStatus(status.copy(lastResult = stamp("Sent $source colours -> ${r.message}"), palette = palette, source = source))
+        Log.i(TAG, "colors ($source/$reason) -> $msg: $palette")
+        setStatus(status.copy(lastResult = stamp("$label -> $msg"), palette = palette, source = source))
+        appCtx?.let { updateAudio(it, prefs) }
     }
 
     private fun artworkPalette(ctx: Context, np: NowPlaying, opts: ExtractOptions): Palette? {
@@ -336,6 +371,23 @@ object SyncEngine {
         val frame = svc.capture() ?: return null
         val p = ColorExtractor.extract(frame.pixels, frame.width, frame.height, opts)
         return if (p.isBlank) null else p
+    }
+
+    private fun scheduleScreenFollowUps() {
+        handler.removeCallbacks(screenFollowUp)
+        if (ScreenCaptureService.instance == null) return
+        for (delay in SCREEN_FOLLOW_UPS_MS) handler.postDelayed(screenFollowUp, delay)
+    }
+
+    private fun onScreenFollowUp() {
+        val ctx = appCtx ?: return
+        val np = current ?: return
+        if (!np.playing) return
+        val prefs = Prefs(ctx)
+        if (!prefs.enabled) return
+        val mode = prefs.sourceModeFor(np.packageName)
+        if (mode == SourceMode.ARTWORK || (mode == SourceMode.AUTO && lastSource == SRC_ARTWORK)) return
+        screenPalette(prefs.extractOptions())?.let { sendPalette(prefs, np, it, SRC_SCREEN, "screen_settle", force = false) }
     }
 
     private fun schedulePoll(prefs: Prefs, np: NowPlaying) {
@@ -362,42 +414,204 @@ object SyncEngine {
         val ctx = appCtx ?: return
         if (!sessionActive) return
         val prefs = Prefs(ctx)
-        val r = deliver(prefs, withStatus(ctx, prefs, Payloads.stopped(current, device)), null, sessionStart = false, preview = false)
         sessionActive = false
+        val msg = deliver(prefs, withStatus(ctx, prefs, Payloads.stopped(current, device)), null, sessionStart = false, preview = false, label = "Playback stopped")
         lastSent?.let { sendPal(current, it, playing = false) }
         lastSent = null
         currentKey = null
         lastSource = null
-        setStatus(status.copy(lastResult = stamp("Playback stopped -> ${r.message}")))
+        handler.removeCallbacks(screenFollowUp)
+        setStatus(status.copy(lastResult = stamp("Playback stopped -> $msg")))
         updateAudio(ctx, prefs)
-        updateRendering(prefs) // a backup listener may take over now
+        reevaluateWled(prefs) // a backup listener may light this device's strips now
     }
 
-    private fun releaseWled() {
-        lastWledCfg?.let { wled.release(it.restore) }
-        lastWledCfg = null
-        rendering = false
-        renderPrio = 0
-        hubShown = null
+    // ---- outputs -------------------------------------------------------------------------------
+
+    /**
+     * Send one payload: WLED right now (engine thread), Home Assistant and MQTT on the network
+     * thread. Returns the WLED part of the result; the rest is added to the status line when the
+     * network thread is done.
+     */
+    private fun deliver(prefs: Prefs, json: JSONObject, palette: Palette?, sessionStart: Boolean, preview: Boolean, label: String): String {
+        val parts = ArrayList<String>()
+        if (prefs.isWledConfigured) {
+            val stopped = json.optString("event") == "stopped"
+            val r = when {
+                stopped -> if (drivenPrio == LightHub.PRIO_PLAYING) stopDriving(prefs, restore = true) else null
+                palette == null -> null
+                preview -> wled.onColors(prefs.wledConfig().also { lastWledCfg = it }, palette, sessionStart, preview = true).message
+                else -> driveWled(prefs, LightHub.PRIO_PLAYING, palette, sessionStart)
+            }
+            if (r != null) parts += r
+        }
+        if (prefs.isHaConfigured || prefs.isMqttConfigured) {
+            parts += if (prefs.isHaConfigured) "HA sending" else "MQTT sending"
+            postNetwork(prefs, json, label)
+        }
+        return parts.joinToString(" | ").ifEmpty { "nothing to send to" }
+    }
+
+    /** Hand a payload to the network thread (HA webhook(s), REST mirror, MQTT). */
+    private fun postNetwork(prefs: Prefs, json: JSONObject, label: String) {
+        val urls = if (prefs.isHaConfigured) prefs.webhookIds.map { it to prefs.webhookUrl(it) } else emptyList()
+        val mirror = if (prefs.isHaConfigured && prefs.token.isNotBlank()) "${prefs.haUrl}/api/states/sensor.music_light_synk" to prefs.token else null
+        val mqttCfg = if (prefs.isMqttConfigured) prefs.mqttConfig(device, Build.MODEL ?: "") else null
+        val controlBlock = controlBlock(prefs)
+        net.post {
+            val parts = ArrayList<String>()
+            val event = json.optString("event")
+            if (urls.isNotEmpty()) {
+                if (event == "colors" && haNeedsSessionStart) json.put("session_start", true)
+                val haBody = JSONObject(json.toString()).also { if (controlBlock != null) it.put("control", controlBlock) }.toString()
+                var anyOk = false
+                for ((id, url) in urls) {
+                    var r = HaClient.postJson(url, haBody)
+                    if (!r.ok && r.code < 0) {
+                        SystemClock.sleep(800) // one retry for flaky Wi-Fi (Fire TV radios like to nap)
+                        r = HaClient.postJson(url, haBody)
+                    }
+                    if (r.ok) anyOk = true
+                    parts += if (urls.size > 1) "$id: ${r.message}" else "HA ${r.message}"
+                }
+                haNeedsSessionStart = when (event) {
+                    "stopped" -> false
+                    "colors" -> !anyOk && (json.optBoolean("session_start") || haNeedsSessionStart)
+                    else -> haNeedsSessionStart
+                }
+                if (mirror != null) {
+                    val s = HaClient.postJson(mirror.first, Payloads.sensorState(json).toString(), mirror.second)
+                    if (!s.ok) parts += "sensor ${s.message}"
+                }
+            }
+            if (mqttCfg != null) {
+                val r = mqtt.publish(mqttCfg, json)
+                if (r.ok) {
+                    net.removeCallbacks(mqttKeepAlive)
+                    net.postDelayed(mqttKeepAlive, MQTT_KEEPALIVE_MS)
+                }
+                parts += r.message
+            }
+            if (parts.isNotEmpty() && event != "status") {
+                handler.post {
+                    val line = status.lastResult
+                    // Replace the "HA sending" placeholder of this send with the real answer.
+                    val updated = if (line.contains(label)) line.replace(Regex("(HA|MQTT) sending"), parts.joinToString(" | ")) else line
+                    setStatus(status.copy(lastResult = updated))
+                }
+            }
+        }
+    }
+
+    /** Where Home Assistant can control this app over Wi-Fi. Only ever sent to HA webhooks. */
+    private fun controlBlock(prefs: Prefs): JSONObject? {
+        val url = status.controlUrl ?: return null
+        if (!prefs.controlEnabled) return null
+        return JSONObject().put("url", url).put("token", prefs.controlToken)
+    }
+
+    // ---- status --------------------------------------------------------------------------------
+
+    private fun appVersion(ctx: Context): String = try {
+        @Suppress("DEPRECATION")
+        ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "?"
+    } catch (e: Exception) {
+        "?"
+    }
+
+    /** Everything Home Assistant needs to show and control the app. No secrets (token, passwords). */
+    private fun statusJson(ctx: Context, prefs: Prefs): JSONObject = JSONObject()
+        .put("app_version", appVersion(ctx))
+        .put("platform", if (prefs.isTv) "tv" else "phone")
+        .put("media_access", MediaListenerService.isEnabled(ctx))
+        .put("media_connected", MediaListenerService.connected)
+        .put("screen_capture", ScreenCaptureService.isRunning)
+        .put("source_mode", prefs.sourceMode.key)
+        .put("last_source", lastSource ?: JSONObject.NULL)
+        .put("enabled", prefs.enabled)
+        .put("audio", audio.active ?: JSONObject.NULL)
+        .put("listening", listenerActive)
+        .put("link_peers", JSONArray(status.peers))
+        .put("wled_renderer", status.renderer ?: JSONObject.NULL)
+        .put(
+            "settings",
+            JSONObject()
+                .put("corner_pct", prefs.cornerPct)
+                .put("saturation_pct", prefs.saturationPct)
+                .put("min_brightness_pct", prefs.minBrightnessPct)
+                .put("screen_interval", prefs.screenIntervalSec)
+                .put("stop_delay", prefs.stopDelaySec)
+                .put("boot_capture", prefs.bootCapture)
+                .put("profiles", prefs.profilesRaw)
+                .put("packages", prefs.allowedPackagesRaw)
+                .put("wled_enabled", prefs.wledEnabled)
+                .put("wled_devices", prefs.wledDevicesRaw)
+                .put("wled_brightness_pct", prefs.wledBrightnessPct)
+                .put("wled_restore", prefs.wledRestore)
+                .put("pulse", prefs.pulseEnabled)
+                .put("pulse_strength", prefs.pulseStrengthPct)
+                .put("audio_source", prefs.audioSource.key)
+                .put("energy_sensitivity", prefs.energySensitivityPct)
+                .put("energy_blur", prefs.energyBlur)
+                .put("energy_bg", prefs.energyBackgroundPct)
+                .put("link_enabled", prefs.linkEnabled)
+                .put("device_name", prefs.deviceName)
+                .put("room", prefs.room)
+                .put("mqtt_enabled", prefs.mqttEnabled),
+        )
+
+    /** Attach the current status to an outgoing payload (keeps HA in sync for free). */
+    private fun withStatus(ctx: Context?, prefs: Prefs, json: JSONObject): JSONObject {
+        if (ctx == null) return json
+        val st = statusJson(ctx, prefs)
+        lastStatusJson = st.toString()
+        return json.put("status", st)
+    }
+
+    /** Queue a status report; the network thread sends at most one every few seconds (the newest). */
+    private fun sendStatus(ctx: Context, prefs: Prefs, force: Boolean) {
+        val st = statusJson(ctx, prefs)
+        val text = st.toString()
+        if (!force && text == lastStatusJson) return
+        if (!prefs.isHaConfigured && !prefs.isMqttConfigured) return
+        lastStatusJson = text
+        val json = Payloads.status(current, device, st)
+        val urls = if (prefs.isHaConfigured) prefs.webhookIds.map { prefs.webhookUrl(it) } else emptyList()
+        val controlBlock = controlBlock(prefs)
+        val haBody = JSONObject(json.toString()).also { if (controlBlock != null) it.put("control", controlBlock) }.toString()
+        val pending = PendingStatus(urls, haBody, if (prefs.isMqttConfigured) prefs.mqttConfig(device, Build.MODEL ?: "") else null, json)
+        net.post {
+            pendingStatus = pending
+            net.removeCallbacks(statusTask)
+            val wait = if (force) 0L else (STATUS_MIN_INTERVAL_MS - (SystemClock.elapsedRealtime() - lastStatusAt)).coerceAtLeast(0L)
+            net.postDelayed(statusTask, wait)
+        }
+    }
+
+    /** A status report waiting on the network thread (only the newest is sent). */
+    private class PendingStatus(val urls: List<String>, val haBody: String, val mqtt: MqttConfig?, val json: JSONObject)
+
+    /** Network thread. */
+    private fun flushStatus() {
+        val p = pendingStatus ?: return
+        pendingStatus = null
+        lastStatusAt = SystemClock.elapsedRealtime()
+        for (url in p.urls) HaClient.postJson(url, p.haBody)
+        if (p.mqtt != null) mqtt.publish(p.mqtt, p.json)
     }
 
     // ---- audio -------------------------------------------------------------------------------
 
     /**
-     * Listen while this device plays music and something wants the levels (an Energy strip, the
-     * beat pulse, or another device on the link), or all the time as the phone's backup listener.
+     * Listen while this device plays music (until the stop delay ends the session) or while the
+     * backup listener is on, using exactly the source the user picked. Nothing else starts or
+     * switches it, so it never flips between device audio and the mic.
      */
     private fun updateAudio(ctx: Context, prefs: Prefs) {
-        val src = prefs.audioSource
-        val playing = prefs.enabled && current?.playing == true &&
-            current?.let { prefs.profileFor(it.packageName) } != AppProfile.OFF
-        val wanted = (prefs.isWledConfigured && prefs.wledConfig().wantsAudio) || link?.peers()?.isNotEmpty() == true
-        val want = when {
-            !prefs.enabled || src == AudioSource.OFF -> AudioSource.OFF
-            playing && wanted -> src
-            listenerActive -> AudioSource.MIC
-            else -> AudioSource.OFF
-        }
+        val playing = sessionActive || (current?.playing == true &&
+            current?.let { prefs.profileFor(it.packageName) } != AppProfile.OFF)
+        val active = prefs.enabled && (playing || listenerActive)
+        val want = if (active) prefs.audioSource else AudioSource.OFF
         val sens = prefs.energySensitivityPct / 100f
         main.post {
             audio.sensitivity = sens
@@ -410,11 +624,14 @@ object SyncEngine {
         if (silent) return
         localLoudAt = SystemClock.elapsedRealtime()
         wled.audio(l)
-        link?.sendToPeers(LinkProtocol.Nrg(selfId, l))
+        val r = room
+        link?.sendToPeers(LinkProtocol.Nrg(selfId, l)) { p -> p.room?.let { LinkProtocol.sameRoom(it, r) } == true }
     }
 
-    /** Link thread: another device's levels, used while this device hears nothing itself. */
+    /** Link thread: a same-room device's levels, used while this device hears nothing itself. */
     private fun onPeerLevels(from: String, l: AudioLevels) {
+        val peerRoom = link?.peer(from)?.room ?: return
+        if (!LinkProtocol.sameRoom(peerRoom, room)) return
         val now = SystemClock.elapsedRealtime()
         if (now - localLoudAt < 500) return
         val current = peerNrgFrom
@@ -424,13 +641,15 @@ object SyncEngine {
         wled.audio(l)
     }
 
-    // ---- device link ---------------------------------------------------------------------------
+    // ---- device link and Wi-Fi control -----------------------------------------------------------
 
-    private fun ensureLink(ctx: Context, prefs: Prefs) {
+    /** Start / stop the device link and the control server to match the settings. */
+    private fun ensureServices(ctx: Context, prefs: Prefs) {
         if (selfId.isEmpty()) {
             selfId = prefs.deviceId
             hub = LightHub(selfId)
         }
+        room = prefs.room
         val l = link
         if (prefs.linkEnabled && l == null) {
             val nl = Link(selfId) { m -> onLinkMessage(m) }
@@ -438,9 +657,9 @@ object SyncEngine {
                 link = nl
                 lastHiAt = 0L
                 acquireMulticast(ctx)
-                Log.i(TAG, "Device link on (id $selfId)")
+                Log.i(TAG, "Device link on (id $selfId, room ${prefs.room})")
             } else {
-                Log.w(TAG, "Device link: UDP port ${LinkProtocol.PORT} unavailable")
+                Log.w(TAG, "Device link: UDP port ${LinkProtocol.PORT} unavailable (${nl.lastError})")
             }
         } else if (!prefs.linkEnabled && l != null) {
             l.stop()
@@ -448,10 +667,58 @@ object SyncEngine {
             releaseMulticast()
             setStatus(status.copy(peers = emptyList()))
         }
-        if (!heartbeatScheduled && (link != null || listenerActive || rendering)) {
+
+        val c = control
+        if (prefs.controlEnabled && c == null) {
+            val server = ControlServer(token = { Prefs(ctx).controlToken }) { action, body -> onControl(ctx, action, body) }
+            if (server.start()) control = server else Log.w(TAG, "Wi-Fi control unavailable: ${server.lastError}")
+        } else if (!prefs.controlEnabled && c != null) {
+            c.stop()
+            control = null
+        }
+        val now = SystemClock.elapsedRealtime()
+        if (control == null || now - lastAddrCheck > 10_000L || status.controlUrl == null) {
+            lastAddrCheck = now
+            controlUrl = if (control != null) ControlServer.lanAddress()?.let { "http://$it:${ControlServer.PORT}" } else null
+        }
+        val url = controlUrl
+        if (url != status.controlUrl) {
+            setStatus(status.copy(controlUrl = url))
+            if (url != null) sendStatus(ctx, prefs, force = true) // tell HA where to reach us
+        }
+
+        if (!heartbeatScheduled && (link != null || listenerActive || driven.isNotEmpty() || control != null)) {
             heartbeatScheduled = true
             handler.postDelayed(heartbeat, HEARTBEAT_MS)
         }
+    }
+
+    /** Control server thread: a request from Home Assistant. */
+    private fun onControl(ctx: Context, action: String, body: JSONObject): String = when (action) {
+        "configure" -> {
+            val values = HashMap<String, Any?>()
+            for (k in body.keys()) values[k] = body.opt(k)?.takeIf { it != JSONObject.NULL }
+            AppSettings.apply(ctx, values)
+        }
+        "test" -> {
+            sendTest(ctx)
+            "Sending test colours"
+        }
+        "status" -> {
+            reportStatus(ctx, force = true)
+            "Status sent"
+        }
+        "capture" -> try {
+            ctx.startActivity(CaptureConsentActivity.intent(ctx))
+            "Requested screen capture"
+        } catch (e: Exception) {
+            "Could not start screen capture from the background: open the app on the device"
+        }
+        "stop_capture" -> {
+            ScreenCaptureService.stop(ctx)
+            "Stopped screen capture"
+        }
+        else -> "Unknown action $action"
     }
 
     /** Link thread. Levels go straight to the renderer; everything else via the engine thread. */
@@ -465,22 +732,15 @@ object SyncEngine {
             val now = SystemClock.elapsedRealtime()
             when (m) {
                 is LinkProtocol.Claim -> {
-                    hub.onClaim(m.from, m.prio, m.playingForMs, now)
-                    updateRendering(Prefs(ctx))
+                    hub.onClaim(m.from, m.prio, m.playingForMs, m.hosts, now)
+                    reevaluateWled(Prefs(ctx))
                 }
                 is LinkProtocol.Pal -> {
-                    peerPal = m
-                    peerPalAt = now
-                    lastPalette = LinkProtocol.palette(m.colors, Prefs(ctx).extractOptions())
-                    if (rendering && renderPrio == LightHub.PRIO_LISTENING) updateRendering(Prefs(ctx))
-                }
-                is LinkProtocol.Wled -> {
-                    val prefs = Prefs(ctx)
-                    if (m.rev > prefs.wledRev) {
-                        Log.i(TAG, "WLED devices updated from ${link?.peer(m.from)?.name ?: m.from}")
-                        prefs.applySyncedWled(m.devices, m.rev)
-                        settingsChanged(ctx)
-                        notifyUi()
+                    val peerRoom = link?.peer(m.from)?.room
+                    if (peerRoom != null && LinkProtocol.sameRoom(peerRoom, room)) {
+                        peerPal = m
+                        peerPalAt = now
+                        if (drivenPrio == LightHub.PRIO_LISTENING) reevaluateWled(Prefs(ctx))
                     }
                 }
                 is LinkProtocol.Hi -> if (now - lastHiAt > 1000) sendHello(ctx, Prefs(ctx), now) // answer newcomers quickly
@@ -494,16 +754,15 @@ object SyncEngine {
         val ctx = appCtx ?: return
         val prefs = Prefs(ctx)
         val now = SystemClock.elapsedRealtime()
-        val l = link
-        if (l != null) {
+        ensureServices(ctx, prefs)
+        if (link != null) {
             if (now - lastHiAt >= HELLO_MS) sendHello(ctx, prefs, now)
             val sent = lastSent
             if (sessionActive && sent != null && now - lastPalAt >= HELLO_MS) sendPal(current, sent, playing = true)
         }
-        updateRendering(prefs)
-        updateAudio(ctx, prefs) // e.g. another device just appeared and wants our levels
-        updateLinkStatus(now)
-        if (link != null || listenerActive || rendering) {
+        reevaluateWled(prefs)
+        updateLinkStatus(ctx, prefs, now)
+        if (!heartbeatScheduled && (link != null || listenerActive || driven.isNotEmpty() || control != null)) {
             heartbeatScheduled = true
             handler.postDelayed(heartbeat, HEARTBEAT_MS)
         }
@@ -512,38 +771,49 @@ object SyncEngine {
     private fun sendHello(ctx: Context, prefs: Prefs, now: Long) {
         val l = link ?: return
         lastHiAt = now
-        l.broadcast(LinkProtocol.Hi(selfId, deviceName(prefs), platform(ctx), listenerActive))
-        if (prefs.wledRev > 0) l.sendToPeers(LinkProtocol.Wled(selfId, prefs.wledDevicesRaw, prefs.wledRev))
+        l.broadcast(LinkProtocol.Hi(selfId, deviceName(prefs), if (prefs.isTv) "tv" else "phone", prefs.room, listenerActive))
     }
 
+    /** Share what's playing with devices in the same room. */
     private fun sendPal(np: NowPlaying?, palette: Palette, playing: Boolean) {
         val l = link ?: return
         lastPalAt = SystemClock.elapsedRealtime()
-        l.sendToPeers(LinkProtocol.Pal(selfId, LinkProtocol.colorsOf(palette), playing, np?.describe()))
+        val r = room
+        l.sendToPeers(LinkProtocol.Pal(selfId, LinkProtocol.colorsOf(palette), playing, np?.describe())) { p ->
+            p.room?.let { LinkProtocol.sameRoom(it, r) } == true
+        }
     }
 
-    private fun updateLinkStatus(now: Long) {
-        val peers = link?.peers()?.map { it.name }?.sorted() ?: emptyList()
+    private fun updateLinkStatus(ctx: Context, prefs: Prefs, now: Long) {
+        val peers = link?.peers()?.map { p ->
+            val rm = p.room
+            if (rm == null || LinkProtocol.sameRoom(rm, prefs.room)) p.name else "${p.name} (${rm.trim()})"
+        }?.sorted() ?: emptyList()
+        val mine = myHosts(prefs)
         val renderer = when {
-            rendering -> "This device"
-            else -> hub.otherRenderer(now)?.let { id -> link?.peer(id)?.name ?: id }
+            driven.isNotEmpty() && driven.size < mine.size -> "This device (${driven.size} of ${mine.size} WLEDs)"
+            driven.isNotEmpty() -> "This device"
+            else -> hub.othersOn(mine, now).firstOrNull()?.let { id -> link?.peer(id)?.name ?: id }
         }
         val a = audio.active
         if (peers != status.peers || renderer != status.renderer || a != status.audio) {
             setStatus(status.copy(peers = peers, renderer = renderer, audio = a))
-            appCtx?.let { sendStatus(it, Prefs(it), force = false) } // keep Home Assistant's sensors current
+            sendStatus(ctx, prefs, force = false) // rate-limited on the network thread
         }
     }
 
-    // ---- who drives WLED -----------------------------------------------------------------------
+    // ---- which WLEDs this device drives --------------------------------------------------------
 
-    /** Priority this device would drive WLED with right now (0 = it doesn't want to). */
+    private fun myHosts(prefs: Prefs): Set<String> =
+        if (!prefs.isWledConfigured) emptySet() else prefs.wledDevices.map { LinkProtocol.normHost(it.host) }.toSet()
+
+    /** Priority this device would drive its WLEDs with right now (0 = it doesn't want to). */
     private fun wantedPrio(prefs: Prefs, now: Long): Int {
         if (!prefs.enabled || !prefs.isWledConfigured) return 0
         if (sessionActive) return LightHub.PRIO_PLAYING
         if (!listenerActive) return 0
-        // Backup listener: music heard for a few seconds (not just a door slam), kept until
-        // it has been quiet for the stop delay.
+        // Backup listener: music heard for a few seconds (not just a door slam), kept until it
+        // has been quiet for the stop delay. Or a device in this room plays and shares its colours.
         val heard = now - localLoudAt < 1500
         if (heard && soundSince == 0L) soundSince = now
         val quietLimit = maxOf(prefs.stopDelaySec, 5) * 1000L
@@ -558,74 +828,104 @@ object SyncEngine {
         else -> if (soundSince == 0L) Long.MAX_VALUE / 4 else now - soundSince
     }
 
-    private fun mayRender(prio: Int, now: Long): Boolean =
-        if (link == null) prio > 0 else hub.mayRender(prio, playingFor(prio, now), now)
-
-    /** Start, keep or stop driving WLED, and tell the other devices. Engine thread. */
-    private fun updateRendering(prefs: Prefs) {
+    /**
+     * Light this device's WLEDs with [palette], except any another device has priority on.
+     * Claims them on the link. Returns the WLED status text.
+     */
+    private fun driveWled(prefs: Prefs, prio: Int, palette: Palette, sessionStart: Boolean): String {
         val now = SystemClock.elapsedRealtime()
-        val prio = wantedPrio(prefs, now)
-        val may = mayRender(prio, now)
-        val l = link
-        if (may) l?.sendToPeers(LinkProtocol.Claim(selfId, prio, playingFor(prio, now)))
-        when {
-            may && prio == LightHub.PRIO_PLAYING -> {
-                if (!rendering) {
-                    // Took over (or got back) the strips mid-song: show this device's colours.
-                    rendering = true
-                    renderPrio = prio
-                    lastSent?.let { p ->
-                        val cfg = prefs.wledConfig()
-                        lastWledCfg = cfg
-                        wled.onColors(cfg, p, sessionStart = hub.otherRenderer(now) == null)
-                    }
-                }
-                renderPrio = prio
-                hubShown = null
-            }
-            may && prio == LightHub.PRIO_LISTENING -> {
-                rendering = true
-                renderPrio = prio
-                showHubColours(prefs, now)
-            }
-            !may && rendering -> {
-                rendering = false
-                renderPrio = 0
-                hubShown = null
-                if (prio == 0) {
-                    l?.sendToPeers(LinkProtocol.Claim(selfId, 0, 0))
-                    stopWled(prefs)
-                } else {
-                    // Another device took over: stop streaming, but don't put WLED's old state back
-                    // now; that could land after the other device's colours.
-                    wled.ambient.stop()
-                }
-            }
-            // We stepped aside earlier and nobody drives the strips any more: put WLED back as it was.
-            !rendering && prio == 0 && wled.hasSavedState && hub.otherRenderer(now) == null -> stopWled(prefs)
-        }
-        if (!heartbeatScheduled && rendering) ensureLink(appCtx ?: return, prefs)
-    }
-
-    private fun stopWled(prefs: Prefs) {
-        lastWledCfg?.let { wled.onStopped(it) } ?: wled.release(prefs.wledRestore)
-    }
-
-    /** As backup listener: the playing device's colours if one tells us, else the last colours seen. */
-    private fun showHubColours(prefs: Prefs, now: Long) {
-        val pal = peerPal
-        val palette = if (pal != null && pal.playing && now - peerPalAt < PEER_PAL_TTL_MS) {
-            LinkProtocol.palette(pal.colors, prefs.extractOptions())
-        } else {
-            lastPalette ?: ColorExtractor.testPalette(prefs.extractOptions())
-        }
-        val shown = hubShown
-        if (shown != null && palette.maxDistanceTo(shown) < CHANGE_THRESHOLD) return
         val cfg = prefs.wledConfig()
         lastWledCfg = cfg
-        val r = wled.onColors(cfg, palette, sessionStart = shown == null && hub.otherRenderer(now) == null)
-        hubShown = palette
-        setStatus(status.copy(lastResult = stamp("Backup listener -> ${r.message}"), palette = palette, source = "listener"))
+        val mine = myHosts(prefs)
+        val allowed = if (link == null) mine else hub.allowedHosts(prio, playingFor(prio, now), mine, now)
+        if (allowed.isEmpty()) {
+            if (driven.isNotEmpty()) wled.ambient.stop() // another device took them all over
+            driven = emptySet()
+            drivenPrio = 0
+            val who = hub.othersOn(mine, now).firstOrNull()?.let { link?.peer(it)?.name ?: it } ?: "another device"
+            return "WLED: $who is driving them"
+        }
+        val newly = allowed - driven
+        // Taking strips over from another device: their colours are not the WLEDs' own state to restore later.
+        val save = (sessionStart || newly.isNotEmpty()) && hub.claimedByOthers(newly, now).isEmpty()
+        driven = allowed
+        drivenPrio = prio
+        claim(prio, now)
+        val sub = cfg.copy(devices = cfg.devices.filter { LinkProtocol.normHost(it.host) in allowed })
+        val r = wled.onColors(sub, palette, save)
+        ensureHeartbeat()
+        return if (allowed.size < mine.size) "${r.message} (${mine.size - allowed.size} WLED driven by another device)" else r.message
+    }
+
+    private fun claim(prio: Int, now: Long) {
+        link?.sendToPeers(LinkProtocol.Claim(selfId, prio, playingFor(prio, now), driven))
+    }
+
+    /** Stop driving; [restore] puts WLEDs back as they were (except those another device drives). */
+    private fun stopDriving(prefs: Prefs, restore: Boolean): String {
+        val now = SystemClock.elapsedRealtime()
+        link?.sendToPeers(LinkProtocol.Claim(selfId, 0, 0, emptySet()))
+        val cfg = lastWledCfg ?: prefs.wledConfig()
+        val others = hub.claimedByOthers(myHosts(prefs), now)
+        driven = emptySet()
+        drivenPrio = 0
+        hubShown = null
+        return if (restore) wled.onStopped(cfg, others).message else {
+            wled.ambient.stop()
+            "WLED released"
+        }
+    }
+
+    /** Start, keep, shrink or stop driving this device's WLEDs, and refresh the claim. Engine thread. */
+    private fun reevaluateWled(prefs: Prefs) {
+        val now = SystemClock.elapsedRealtime()
+        val prio = wantedPrio(prefs, now)
+        if (prio == 0) {
+            if (driven.isNotEmpty()) stopDriving(prefs, restore = true) // listener went quiet, or syncing / WLED switched off
+            return
+        }
+        val mine = myHosts(prefs)
+        val allowed = if (link == null) mine else hub.allowedHosts(prio, playingFor(prio, now), mine, now)
+        when (prio) {
+            LightHub.PRIO_PLAYING -> {
+                val p = lastSent ?: return
+                if (allowed != driven) driveWled(prefs, prio, p, sessionStart = false) else claim(prio, now)
+            }
+            else -> {
+                val palette = hubPalette(prefs, now)
+                val shown = hubShown
+                if (allowed != driven || drivenPrio != prio || shown == null || palette.maxDistanceTo(shown) >= CHANGE_THRESHOLD) {
+                    val msg = driveWled(prefs, prio, palette, sessionStart = shown == null)
+                    hubShown = palette
+                    setStatus(status.copy(lastResult = stamp("Backup listener -> $msg"), palette = palette, source = "listener"))
+                } else {
+                    claim(prio, now)
+                }
+            }
+        }
+    }
+
+    /** As backup listener: the colours a same-room device shares, else the last colours seen. */
+    private fun hubPalette(prefs: Prefs, now: Long): Palette {
+        val pal = peerPal
+        if (pal != null && pal.playing && now - peerPalAt < PEER_PAL_TTL_MS) return LinkProtocol.palette(pal.colors, prefs.extractOptions())
+        return lastPalette ?: ColorExtractor.testPalette(prefs.extractOptions())
+    }
+
+    private fun releaseWled() {
+        val cfg = lastWledCfg ?: return
+        link?.sendToPeers(LinkProtocol.Claim(selfId, 0, 0, emptySet()))
+        wled.release(cfg.restore)
+        lastWledCfg = null
+        driven = emptySet()
+        drivenPrio = 0
+        hubShown = null
+    }
+
+    private fun ensureHeartbeat() {
+        if (heartbeatScheduled) return
+        heartbeatScheduled = true
+        handler.postDelayed(heartbeat, HEARTBEAT_MS)
     }
 
     private fun acquireMulticast(ctx: Context) {
@@ -651,162 +951,7 @@ object SyncEngine {
 
     private fun deviceName(prefs: Prefs): String = prefs.deviceName.ifBlank { Build.MODEL ?: device }
 
-    private fun platform(ctx: Context): String =
-        if (ctx.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)) "tv" else "phone"
-
     private fun ctxOrNull(): Context? = appCtx
-
-    private fun appVersion(ctx: Context): String = try {
-        @Suppress("DEPRECATION")
-        ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "?"
-    } catch (e: Exception) {
-        "?"
-    }
-
-    /** Everything Home Assistant needs to show and control the app. No secrets (token, passwords). */
-    private fun statusJson(ctx: Context, prefs: Prefs): JSONObject = JSONObject()
-        .put("app_version", appVersion(ctx))
-        .put("media_access", MediaListenerService.isEnabled(ctx))
-        .put("media_connected", MediaListenerService.connected)
-        .put("screen_capture", ScreenCaptureService.isRunning)
-        .put("source_mode", prefs.sourceMode.key)
-        .put("last_source", lastSource ?: JSONObject.NULL)
-        .put("enabled", prefs.enabled)
-        .put("audio", audio.active ?: JSONObject.NULL)
-        .put("listening", listenerActive)
-        .put("link_peers", org.json.JSONArray(status.peers))
-        .put("wled_renderer", status.renderer ?: JSONObject.NULL)
-        .put(
-            "settings",
-            JSONObject()
-                .put("corner_pct", prefs.cornerPct)
-                .put("saturation_pct", prefs.saturationPct)
-                .put("min_brightness_pct", prefs.minBrightnessPct)
-                .put("screen_interval", prefs.screenIntervalSec)
-                .put("stop_delay", prefs.stopDelaySec)
-                .put("boot_capture", prefs.bootCapture)
-                .put("profiles", prefs.profilesRaw)
-                .put("packages", prefs.allowedPackagesRaw)
-                .put("wled_enabled", prefs.wledEnabled)
-                .put("wled_devices", prefs.wledDevicesRaw)
-                .put("wled_brightness_pct", prefs.wledBrightnessPct)
-                .put("wled_restore", prefs.wledRestore)
-                .put("pulse", prefs.pulseEnabled)
-                .put("pulse_strength", prefs.pulseStrengthPct)
-                .put("audio_source", prefs.audioSource.key)
-                .put("energy_sensitivity", prefs.energySensitivityPct)
-                .put("energy_blur", prefs.energyBlur)
-                .put("energy_bg", prefs.energyBackgroundPct)
-                .put("link_enabled", prefs.linkEnabled)
-                .put("device_name", prefs.deviceName)
-                .put("mqtt_enabled", prefs.mqttEnabled),
-        )
-
-    /** Attach the current status to an outgoing payload (keeps HA in sync for free). */
-    private fun withStatus(ctx: Context?, prefs: Prefs, json: JSONObject): JSONObject {
-        if (ctx == null) return json
-        val st = statusJson(ctx, prefs)
-        lastStatusJson = st.toString()
-        return json.put("status", st)
-    }
-
-    private fun sendStatus(ctx: Context, prefs: Prefs, force: Boolean) {
-        val st = statusJson(ctx, prefs)
-        val text = st.toString()
-        if (!force && text == lastStatusJson) return
-        if (!prefs.isHaConfigured && !prefs.isMqttConfigured) return
-        lastStatusJson = text
-        val json = Payloads.status(current, device, st)
-        val body = json.toString()
-        if (prefs.isHaConfigured) for (id in prefs.webhookIds) HaClient.postJson(prefs.webhookUrl(id), body)
-        if (prefs.isMqttConfigured) mqtt.publish(prefs.mqttConfig(device, Build.MODEL ?: ""), json)
-    }
-
-    /** Send one payload to every configured output. ok = at least one output accepted it. */
-    private fun deliver(prefs: Prefs, json: JSONObject, palette: Palette?, sessionStart: Boolean, preview: Boolean): HaClient.Result {
-        if (!prefs.hasOutput) {
-            return HaClient.Result(false, 0, "not sent: set up Home Assistant, MQTT or WLED first")
-        }
-        val parts = ArrayList<String>()
-        var ok = false
-        val body = json.toString()
-        val stopped = json.optString("event") == "stopped"
-
-        if (prefs.isHaConfigured) {
-            val ids = prefs.webhookIds
-            for (id in ids) {
-                var r = HaClient.postJson(prefs.webhookUrl(id), body)
-                if (!r.ok && r.code < 0) {
-                    // One retry for flaky Wi-Fi (Fire TV radios like to nap).
-                    SystemClock.sleep(800)
-                    r = HaClient.postJson(prefs.webhookUrl(id), body)
-                }
-                if (r.ok) ok = true
-                parts += if (ids.size > 1) "$id: ${r.message}" else "HA ${r.message}"
-            }
-            val token = prefs.token
-            if (token.isNotBlank()) {
-                val s = HaClient.postJson(
-                    "${prefs.haUrl}/api/states/sensor.music_light_synk",
-                    Payloads.sensorState(json).toString(),
-                    token,
-                )
-                if (!s.ok) parts += "sensor ${s.message}"
-            }
-        }
-
-        if (prefs.isMqttConfigured) {
-            val r = mqtt.publish(prefs.mqttConfig(device, Build.MODEL ?: ""), json)
-            if (r.ok) {
-                ok = true
-                handler.removeCallbacks(mqttKeepAlive)
-                handler.postDelayed(mqttKeepAlive, MQTT_KEEPALIVE_MS)
-            }
-            parts += r.message
-        }
-
-        if (prefs.isWledConfigured) {
-            val cfg = prefs.wledConfig()
-            lastWledCfg = cfg
-            val wasRendering = rendering && renderPrio == LightHub.PRIO_PLAYING
-            // Taking the strips from another device: its colours are not WLED's "own" state to restore later.
-            val takingOver = !wasRendering && hub.otherRenderer(SystemClock.elapsedRealtime()) != null
-            val r = when {
-                stopped -> if (rendering && renderPrio == LightHub.PRIO_PLAYING) {
-                    rendering = false
-                    renderPrio = 0
-                    link?.sendToPeers(LinkProtocol.Claim(selfId, 0, 0))
-                    wled.onStopped(cfg)
-                } else {
-                    null
-                }
-                palette == null -> null
-                preview -> wled.onColors(cfg, palette, sessionStart, preview = true)
-                // taking the strips over mid-song counts as a new session (save WLED's state first)
-                claimWled(prefs) -> wled.onColors(cfg, palette, (sessionStart || !wasRendering) && !takingOver, preview = false)
-                else -> WledController.Result(false, "WLED: ${status.renderer ?: "another device"} drives the strips")
-            }
-            if (r != null) {
-                if (r.ok) ok = true
-                parts += r.message
-            }
-        }
-        return HaClient.Result(ok, if (ok) 200 else -1, parts.joinToString(" | "))
-    }
-
-    /** About to send this device's colours: may it drive WLED (it plays music)? Claims it if so. */
-    private fun claimWled(prefs: Prefs): Boolean {
-        val now = SystemClock.elapsedRealtime()
-        if (!mayRender(LightHub.PRIO_PLAYING, now)) return false
-        if (!rendering || renderPrio != LightHub.PRIO_PLAYING) {
-            rendering = true
-            renderPrio = LightHub.PRIO_PLAYING
-            hubShown = null
-            link?.sendToPeers(LinkProtocol.Claim(selfId, LightHub.PRIO_PLAYING, playingFor(LightHub.PRIO_PLAYING, now)))
-            appCtx?.let { ensureLink(it, prefs) }
-        }
-        return true
-    }
 
     private fun stamp(msg: String): String = "${timeFmt.format(Date())}  $msg"
 

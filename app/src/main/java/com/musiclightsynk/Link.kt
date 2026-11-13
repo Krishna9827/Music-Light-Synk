@@ -1,5 +1,6 @@
 package com.musiclightsynk
 
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -12,10 +13,16 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /*
- * Device link: Music Light Synk apps on the same Wi-Fi (Fire TV, phone, later PC / Mac) share
- * what's playing and the beat, and agree on which one drives the WLED strips. No server, no
- * Home Assistant: JSON over UDP port 21330. "hi" is broadcast every few seconds so devices find
- * each other; everything else goes straight (unicast) to the devices found.
+ * Device link: Music Light Synk apps on the same Wi-Fi (Fire TV, phones, later PC / Mac) find
+ * each other with no server and no Home Assistant: JSON over UDP port 21330. "hi" is broadcast
+ * every few seconds; everything else goes straight (unicast) to the devices found.
+ *
+ * Every device keeps its own WLED list and lights its own strips. The link only matters where
+ * devices meet:
+ *  - two devices that list the same WLED take turns on it (claims are per WLED host), so a phone
+ *    in the bedroom never gives way to the TV in the living room;
+ *  - devices in the same room (a name set in the app) share the beat and the album colours, so a
+ *    phone's mic can feed a TV that can't hear its own audio.
  *
  * Pure JVM code (no Android classes); unit tested.
  */
@@ -23,14 +30,20 @@ import kotlin.math.roundToInt
 object LinkProtocol {
     const val PORT = 21330
     const val GROUP = "home"
-    private const val VERSION = 1
+    private const val VERSION = 2
 
     sealed class Msg {
         abstract val from: String
     }
 
-    /** "I'm here." [platform] e.g. "tv" / "phone"; [listening] = backup mic is on. */
-    data class Hi(override val from: String, val name: String, val platform: String, val listening: Boolean = false) : Msg()
+    /** "I'm here." [platform] e.g. "tv" / "phone"; [room] scopes sharing; [listening] = backup mic is on. */
+    data class Hi(
+        override val from: String,
+        val name: String,
+        val platform: String,
+        val room: String = "",
+        val listening: Boolean = false,
+    ) : Msg()
 
     /** What this device plays: raw colours per slot. Sent on each change and every few seconds while playing. */
     data class Pal(override val from: String, val colors: Map<Slot, Rgb>, val playing: Boolean, val title: String? = null) : Msg()
@@ -38,16 +51,16 @@ object LinkProtocol {
     /** Live band levels, 20-45 times a second while the device hears music. */
     data class Nrg(override val from: String, val levels: AudioLevels) : Msg()
 
-    /** "I'm driving the WLED strips" with priority [prio]; [playingForMs] breaks ties (newest wins). */
-    data class Claim(override val from: String, val prio: Int, val playingForMs: Long) : Msg()
-
-    /** The WLED device list; the newest [rev] wins on every device. */
-    data class Wled(override val from: String, val devices: String, val rev: Long) : Msg()
+    /**
+     * "I'm driving these WLED [hosts]" with priority [prio]; [playingForMs] breaks ties (newest
+     * wins). [hosts] null = an older app that didn't say: treated as every host.
+     */
+    data class Claim(override val from: String, val prio: Int, val playingForMs: Long, val hosts: Set<String>? = emptySet()) : Msg()
 
     fun encode(m: Msg): ByteArray {
         val o = JSONObject().put("v", VERSION).put("g", GROUP).put("id", m.from)
         when (m) {
-            is Hi -> o.put("t", "hi").put("name", m.name).put("plat", m.platform).put("listen", m.listening)
+            is Hi -> o.put("t", "hi").put("name", m.name).put("plat", m.platform).put("room", m.room).put("listen", m.listening)
             is Pal -> {
                 val cols = JSONObject()
                 for ((slot, c) in m.colors) cols.put(slot.key, c.hex)
@@ -56,8 +69,10 @@ object LinkProtocol {
             }
             is Nrg -> o.put("t", "nrg").put("l", r3(m.levels.lows)).put("m", r3(m.levels.mids)).put("h", r3(m.levels.highs))
                 .put("b", m.levels.beat)
-            is Claim -> o.put("t", "claim").put("prio", m.prio).put("age", m.playingForMs)
-            is Wled -> o.put("t", "wled").put("devices", m.devices).put("rev", m.rev)
+            is Claim -> {
+                o.put("t", "claim").put("prio", m.prio).put("age", m.playingForMs)
+                if (m.hosts != null) o.put("hosts", JSONArray(m.hosts.sorted()))
+            }
         }
         return o.toString().toByteArray(Charsets.UTF_8)
     }
@@ -70,7 +85,7 @@ object LinkProtocol {
             null
         } else {
             when (o.optString("t")) {
-                "hi" -> Hi(id, o.optString("name", id), o.optString("plat"), o.optBoolean("listen"))
+                "hi" -> Hi(id, o.optString("name", id), o.optString("plat"), o.optString("room"), o.optBoolean("listen"))
                 "pal" -> {
                     val cols = o.getJSONObject("pal")
                     val map = LinkedHashMap<Slot, Rgb>()
@@ -78,20 +93,31 @@ object LinkProtocol {
                     if (map.size == Slot.values().size) Pal(id, map, o.optBoolean("playing"), o.optString("title").ifEmpty { null }) else null
                 }
                 "nrg" -> Nrg(id, AudioLevels(f01(o, "l"), f01(o, "m"), f01(o, "h"), o.optBoolean("b")))
-                "claim" -> Claim(id, o.getInt("prio"), o.optLong("age"))
-                "wled" -> Wled(id, o.getString("devices"), o.getLong("rev"))
-                else -> null
+                "claim" -> {
+                    val arr = o.optJSONArray("hosts")
+                    val hosts = arr?.let { a -> (0 until a.length()).map { normHost(a.getString(it)) }.toSet() }
+                    Claim(id, o.getInt("prio"), o.optLong("age"), hosts)
+                }
+                else -> null // includes v0.6's "wled" list sync, which is gone: every device keeps its own list
             }
         }
     } catch (e: Exception) {
         null
     }
 
+    /** Same WLED written two ways ("192.168.1.60" / "192.168.1.60:80" / upper case) compares equal. */
+    fun normHost(h: String): String = h.trim().lowercase().removePrefix("http://").trimEnd('/').removeSuffix(":80")
+
     /** Rebuild a palette from raw colours with this device's own light settings. */
     fun palette(colors: Map<Slot, Rgb>, opts: ExtractOptions): Palette =
         Palette(colors.mapValues { (_, raw) -> ColorExtractor.toLight(raw, opts) })
 
     fun colorsOf(p: Palette): Map<Slot, Rgb> = Slot.values().associateWith { p[it].raw }
+
+    /** Rooms match ignoring case and spaces; an empty room counts as "Home". */
+    fun sameRoom(a: String, b: String): Boolean = roomKey(a) == roomKey(b)
+
+    private fun roomKey(r: String) = r.trim().lowercase().replace(" ", "").ifEmpty { "home" }
 
     private fun r3(v: Float) = (v.coerceIn(0f, 1f) * 1000).roundToInt() / 1000.0
     private fun f01(o: JSONObject, k: String) = o.optDouble(k, 0.0).toFloat().coerceIn(0f, 1f)
@@ -105,39 +131,58 @@ object LinkProtocol {
 }
 
 /**
- * Decides which device drives the WLED strips, so two devices never fight over them.
- * Every device that wants to render claims a priority about once a second:
+ * Decides which device drives each WLED, so two devices never fight over a strip. Every device
+ * that drives strips claims them (by host) about once a second:
  *  - [PRIO_PLAYING]   it plays music itself and knows the artwork colours,
  *  - [PRIO_LISTENING] a backup listener (phone mic) hears music but doesn't know the colours.
- * The highest priority wins; between equals, the one that started playing most recently; then
- * the lower id. Claims expire after [ttlMs]. Pure, unit tested.
+ * For each host, the highest priority wins; between equals, the one that started playing most
+ * recently; then the lower id. Devices with no WLED in common never affect each other. Claims
+ * expire after [ttlMs]. Pure, unit tested.
  */
 class LightHub(private val selfId: String, private val ttlMs: Long = 2500) {
-    private class Claim(val prio: Int, val playingForMs: Long, val atMs: Long)
+    private class Claim(val prio: Int, val playingForMs: Long, val hosts: Set<String>?, val atMs: Long) {
+        fun covers(host: String) = hosts == null || host in hosts
+    }
 
     private val claims = HashMap<String, Claim>()
 
     @Synchronized
-    fun onClaim(id: String, prio: Int, playingForMs: Long, nowMs: Long) {
+    fun onClaim(id: String, prio: Int, playingForMs: Long, hosts: Set<String>?, nowMs: Long) {
         if (id == selfId) return
-        if (prio <= 0) claims.remove(id) else claims[id] = Claim(prio, playingForMs, nowMs)
+        if (prio <= 0 || hosts?.isEmpty() == true) claims.remove(id) else claims[id] = Claim(prio, playingForMs, hosts, nowMs)
     }
 
-    /** Whether this device may drive WLED now, wanting priority [prio]. */
+    /**
+     * Which of [myHosts] (normalised, see [LinkProtocol.normHost]) this device may drive with
+     * priority [prio]: everything except hosts a stronger device claims.
+     */
     @Synchronized
-    fun mayRender(prio: Int, playingForMs: Long, nowMs: Long): Boolean {
-        if (prio <= 0) return false
+    fun allowedHosts(prio: Int, playingForMs: Long, myHosts: Set<String>, nowMs: Long): Set<String> {
+        if (prio <= 0 || myHosts.isEmpty()) return emptySet()
         expire(nowMs)
-        return claims.none { (id, c) -> beats(c.prio, c.playingForMs + (nowMs - c.atMs), id, prio, playingForMs) }
+        val taken = HashSet<String>()
+        for ((id, c) in claims) {
+            if (!beats(c.prio, c.playingForMs + (nowMs - c.atMs), id, prio, playingForMs)) continue
+            if (c.hosts == null) return emptySet()
+            taken += c.hosts
+        }
+        return myHosts - taken
     }
 
-    /** Id of the device driving WLED other than us, or null. */
+    /** Which of [hosts] some other device claims right now. */
     @Synchronized
-    fun otherRenderer(nowMs: Long): String? {
+    fun claimedByOthers(hosts: Set<String>, nowMs: Long): Set<String> {
         expire(nowMs)
-        return claims.entries.sortedWith(
-            compareByDescending<Map.Entry<String, Claim>> { it.value.prio }.thenBy { it.value.playingForMs }.thenBy { it.key },
-        ).firstOrNull()?.key
+        return hosts.filter { h -> claims.values.any { it.covers(h) } }.toSet()
+    }
+
+    /** Other devices currently claiming any of [hosts] (strongest first). */
+    @Synchronized
+    fun othersOn(hosts: Set<String>, nowMs: Long): List<String> {
+        expire(nowMs)
+        return claims.entries.filter { (_, c) -> hosts.any { c.covers(it) } }
+            .sortedWith(compareByDescending<Map.Entry<String, Claim>> { it.value.prio }.thenBy { it.value.playingForMs }.thenBy { it.key })
+            .map { it.key }
     }
 
     private fun expire(nowMs: Long) {
@@ -172,6 +217,10 @@ class Link(
 
         @Volatile
         var listening = false
+
+        /** Null until its first "hi". */
+        @Volatile
+        var room: String? = null
     }
 
     private var socket: DatagramSocket? = null
@@ -260,6 +309,7 @@ class Link(
                 p.name = m.name
                 p.platform = m.platform
                 p.listening = m.listening
+                p.room = m.room
             }
             try {
                 onMessage(m)

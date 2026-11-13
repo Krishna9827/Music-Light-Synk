@@ -2,6 +2,7 @@ package com.musiclightsynk
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import java.net.URLEncoder
 
 enum class SourceMode(val key: String, val label: String) {
@@ -21,6 +22,9 @@ enum class SourceMode(val key: String, val label: String) {
 class Prefs(context: Context) {
     private val sp: SharedPreferences =
         context.applicationContext.getSharedPreferences("music_light_synk", Context.MODE_PRIVATE)
+
+    /** Fire TV / Android TV (no mic, plays the music itself) vs phone / tablet. */
+    val isTv: Boolean by lazy { context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK) }
 
     private fun str(k: String, def: String = "") = sp.getString(k, def) ?: def
     private fun putStr(k: String, v: String) = sp.edit().putString(k, v.trim()).apply()
@@ -184,18 +188,8 @@ class Prefs(context: Context) {
 
     val wledDevices: List<WledDevice> get() = WledDevices.parse(wledDevicesRaw).devices
 
-    /** A local edit (app, ADB, Home Assistant): becomes the newest list for every linked device. */
-    fun setWledDevices(devices: List<WledDevice>) {
-        sp.edit().putString(K_WLED_DEVICES, WledDevices.format(devices)).putLong(K_WLED_REV, System.currentTimeMillis()).apply()
-    }
-
-    /** When the WLED list was last edited (ms since epoch; 0 = never). Newest wins across the link. */
-    val wledRev: Long get() = sp.getLong(K_WLED_REV, 0L)
-
-    /** A newer list from another device on the link. */
-    fun applySyncedWled(raw: String, rev: Long) {
-        sp.edit().putString(K_WLED_DEVICES, WledDevices.format(WledDevices.parse(raw).devices)).putLong(K_WLED_REV, rev).apply()
-    }
+    /** This device's own list: never shared with other devices. */
+    fun setWledDevices(devices: List<WledDevice>) = putStr(K_WLED_DEVICES, WledDevices.format(devices))
 
     var wledBrightnessPct: Int
         get() = sp.getInt(K_WLED_BRI, 100).coerceIn(1, 100)
@@ -227,9 +221,21 @@ class Prefs(context: Context) {
 
     // ---- Audio and the Energy effect ---------------------------------------------------------
 
+    /**
+     * Exactly one source, never switched automatically. Default: device audio on a TV, the
+     * microphone on a phone (phones rarely let apps hear other apps' audio). Older "auto" counts
+     * as the default.
+     */
     var audioSource: AudioSource
-        get() = AudioSource.of(str(K_AUDIO_SOURCE, AudioSource.AUTO.key))
+        get() = AudioSource.of(str(K_AUDIO_SOURCE)) ?: defaultAudioSource
         set(v) = putStr(K_AUDIO_SOURCE, v.key)
+
+    /** Free text from ADB / Home Assistant; anything unknown means the default. */
+    var audioSourceRaw: String
+        get() = audioSource.key
+        set(v) = putStr(K_AUDIO_SOURCE, AudioSource.of(v)?.key ?: "")
+
+    val defaultAudioSource: AudioSource get() = if (isTv) AudioSource.OUTPUT else AudioSource.MIC
 
     /** How far the bars reach for the same loudness, in %. */
     var energySensitivityPct: Int
@@ -264,7 +270,25 @@ class Prefs(context: Context) {
             java.util.UUID.randomUUID().toString().replace("-", "").take(10).also { putStr(K_DEVICE_ID, it) }
         }
 
-    /** Phone as backup listener: keeps the mic on and drives WLED when nothing else does. */
+    /** Devices in the same room share the beat and album colours. Different rooms stay apart. */
+    var room: String
+        get() = str(K_ROOM, "Home").ifBlank { "Home" }
+        set(v) = putStr(K_ROOM, v.take(40))
+
+    /** Home Assistant may change settings over Wi-Fi ([ControlServer]). */
+    var controlEnabled: Boolean
+        get() = sp.getBoolean(K_CONTROL, true)
+        set(v) = putBool(K_CONTROL, v)
+
+    /** Secret for [ControlServer], made once; only ever sent to Home Assistant. */
+    val controlToken: String
+        get() = str(K_CONTROL_TOKEN).ifEmpty {
+            val rnd = java.security.SecureRandom()
+            val bytes = ByteArray(16).also { rnd.nextBytes(it) }
+            bytes.joinToString("") { "%02x".format(it) }.also { putStr(K_CONTROL_TOKEN, it) }
+        }
+
+    /** Phone as backup listener: keeps the mic on and drives this device's WLEDs when it hears music. */
     var listenerEnabled: Boolean
         get() = sp.getBoolean(K_LISTENER, false)
         set(v) = putBool(K_LISTENER, v)
@@ -366,7 +390,9 @@ class Prefs(context: Context) {
         private const val K_WLED_RESTORE = "wled_restore"
         private const val K_PULSE = "pulse"
         private const val K_PULSE_STRENGTH = "pulse_strength"
-        private const val K_WLED_REV = "wled_devices_rev"
+        private const val K_ROOM = "room"
+        private const val K_CONTROL = "control_enabled"
+        private const val K_CONTROL_TOKEN = "control_token"
         private const val K_AUDIO_SOURCE = "audio_source"
         private const val K_ENERGY_SENS = "energy_sensitivity"
         private const val K_ENERGY_BLUR = "energy_blur"

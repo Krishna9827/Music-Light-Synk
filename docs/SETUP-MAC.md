@@ -112,8 +112,8 @@ That's all the Mac is needed for.
 
 ### 7. Add the Fire TV to Home Assistant (Android Debug Bridge)
 
-This lets Home Assistant change the TV app's settings: colour source, screen capture, WLED, and
-everything else. Skip it if you only want the lights to follow the music. You can add it later.
+Optional since v0.7: Home Assistant controls the app over Wi-Fi by itself. ADB adds the
+**Grant TV permissions** button and a fallback. Skip it if you like; you can add it later.
 
 1. **Settings → Devices & services → Add integration → Android Debug Bridge**.
 2. Host: `192.168.1.50`, device type **Fire TV**, port `5555`. Leave the ADB key path and the
@@ -160,7 +160,7 @@ Open **Settings → Devices & services → Music Light Synk → your TV**:
 1. Press **Test lights**. Your lights show a rainbow for 6 seconds and then go back: top-left red,
    top orange, top-right yellow, right green, bottom-right cyan, bottom blue, bottom-left indigo,
    left pink, dominant purple.
-2. With the Fire TV added (step 7): press **Send test colours from TV** (under *Configuration*).
+2. Press **Send test colours from TV** (under *Configuration*).
    Same rainbow, but this time it comes from the TV app, so the whole path works.
 3. Play a song in Spotify / Amazon Music / Apple Music on the Fire TV. The lights change within a
    second or two of each new track, and **Colour source** shows *Album art (media access)*.
@@ -169,24 +169,25 @@ Open **Settings → Devices & services → Music Light Synk → your TV**:
 
 ## What you can do from Home Assistant now
 
-Everything is on the TV's device page. Controls marked *(Fire TV)* need step 7.
+Everything is on the TV's device page. The controls work over Wi-Fi as soon as the app has
+sent its first update (v0.7 and later); step 7 (ADB) is only needed for *Grant TV permissions*.
 
 | What | Where |
 |---|---|
 | Where the colours come from | **Colour source** sensor: *Album art (media access)* or *Screen capture* |
 | Is media access granted / screen capture running? | **Media access**, **Screen capture** binary sensors |
-| Switch album art ↔ screen capture *(Fire TV)* | **Colour source mode**: Auto / Album art / Screen capture |
-| Start / stop screen capture *(Fire TV)* | **Screen capture** switch |
-| Pause everything | **TV syncing** switch *(Fire TV)* (the app) or **Light sync** switch (only HA's lights) |
-| Beat pulse for WLED ambient strips *(Fire TV)* | **Beat pulse** switch, **Pulse strength** number |
-| WLED devices and what each one shows *(Fire TV)* | **WLED devices** text (format below), **WLED output**, **WLED brightness** |
-| Energy (bars to the beat) *(Fire TV)* | `:energy`, `:flip`, `:mirror` in **WLED devices**; **Energy sensitivity**, **Energy blur**, **Energy background brightness** numbers |
-| What the app listens to | **Audio** sensor; change it with **Audio source** *(Fire TV)*: Auto / Device audio / Microphone / Off |
-| Phone ↔ TV link | **WLED driven by** sensor (attribute `linked_devices`), **Device link** switch *(Fire TV)* |
-| Per-app profiles *(Fire TV)* | **Per-app profiles** text, e.g. `com.google.android.youtube.tv=screen;com.netflix.ninja=off` |
-| Edge size, saturation, minimum brightness, re-sample interval, stop delay *(Fire TV)* | Numbers under *Configuration* |
-| Fix permissions *(Fire TV)* | **Grant TV permissions** button |
-| See the latest values *(Fire TV)* | **Refresh TV app status** button |
+| Switch album art ↔ screen capture | **Colour source mode**: Auto / Album art / Screen capture |
+| Start / stop screen capture | **Screen capture** switch |
+| Pause everything | **TV syncing** switch (the app) or **Light sync** switch (only HA's lights) |
+| Beat pulse for WLED ambient strips | **Beat pulse** switch, **Pulse strength** number |
+| WLED devices and what each one shows | **WLED devices** text (format below), **WLED output**, **WLED brightness** |
+| Energy (bars to the beat) | `:energy`, `:flip`, `:mirror` in **WLED devices**; **Energy sensitivity**, **Energy blur**, **Energy background brightness** numbers |
+| What the app listens to | **Audio** sensor; change it with **Audio source**: Device audio / Microphone / Off |
+| Phone ↔ TV link | **WLED driven by** sensor (attribute `linked_devices`), **Device link** switch |
+| Per-app profiles | **Per-app profiles** text, e.g. `com.google.android.youtube.tv=screen;com.netflix.ninja=off` |
+| Edge size, saturation, minimum brightness, re-sample interval, stop delay | Numbers under *Configuration* |
+| Fix permissions | **Grant TV permissions** button (needs step 7) |
+| See the latest values | **Refresh TV app status** button |
 
 The values come from the app itself, so changes made on the TV, over ADB or from Home Assistant
 all show up in the same place.
@@ -239,21 +240,33 @@ ambient strip bounces in its own gradient. The same from Home Assistant, in **WL
 > **Soundbar with Dolby / DTS (HDMI passthrough)?** Android never sees that audio, so the TV
 > hears silence. Use the phone as backup listener (step 11): it sends the beat to the TV.
 
-### 11. The phone (Android)
+### 11. The phone (Android), e.g. for another room
+
+The phone app works completely on its own: its own WLED lights, its own Home Assistant device,
+no Fire TV needed.
 
 1. On the phone, open https://github.com/Krishna9827/Music-Light-Synk/releases/latest and tap
    **music-light-synk.apk**. Allow the browser to install apps when asked, then **Install**.
 2. Open **Music Light Synk** → *Status & permissions* → **Grant media access** → turn on
-   *Music Light Synk* in the list (this lets it see what the phone plays).
-3. Keep the phone on the same Wi-Fi as the TV. Under *Other devices* it shows
-   **Found: (your Fire TV)** within a few seconds, and the **WLED devices** list copies itself
-   over from the TV. Edit it on either device; the other follows.
-4. **Backup listener (mic): ON**, then allow the microphone and notifications. Leave the phone
-   near the speakers. When music plays that no app device is playing (iPhone, Mac or PC on the
-   2.1 speakers), the strips bounce after a few seconds, in the last album's colours. As soon as
-   the TV (or the phone itself) plays music, that device takes over.
+   *Music Light Synk* in the list (this lets it see what the phone plays and its album art).
+3. **WLED devices**: add the WLEDs of that room (IP address → **Add**), pick each one's zone and
+   **Energy / Flip / Mirror**. This list belongs to the phone only.
+4. **Other devices** → **Room**: type the room, e.g. `Bedroom`, and press **Save room and name**.
+   Devices in other rooms then never share their beat or colours with it. (If the phone also lists
+   a WLED the TV uses, they take turns on that one WLED only.)
+5. **Beat & audio** → **Listen to: Microphone** (the default on a phone; phones rarely let apps hear
+   other apps' audio). It stays on the source you pick.
+6. **Home Assistant** card: your HA URL, and a webhook ID of its own, e.g.
+   `music_light_synk_bedroom`. **Save**. Then in Home Assistant add the integration once more
+   (**Add integration → Music Light Synk**) with that same webhook ID, pick the bedroom's lights,
+   and leave the Fire TV step empty. As soon as the phone sends its first update, every control on
+   its device page works over Wi-Fi.
+7. Optional, **Backup listener (mic): ON** (allow the microphone and notifications): the phone's
+   WLEDs bounce to music played nearby on anything (iPhone, Mac, PC on the speakers) in the last
+   album's colours. After a phone restart, open the app once so Android lets it use the mic again.
 
-After a phone restart, open the app once so Android lets the listener use the mic again.
+Using the phone as a backup mic for the **TV** instead? Give both the same **Room** (default
+`Home`): when the TV can't hear its own audio (HDMI passthrough), it uses the phone's beat.
 
 ---
 
@@ -267,10 +280,11 @@ Look at the TV's device page first:
 | **Colour source** says *Nothing yet* while music plays | The app doesn't see the song. Check *Media access*, then press **Refresh TV app status** |
 | Lights don't change, but *Now playing* updates | Check **Light sync** is on and lights are picked under *Configure → Lights* |
 | *Now playing* never updates | The TV can't reach HA: wrong HA IP/port in step 6, or the webhook IDs don't match |
-| TV controls are *unavailable* | No Fire TV picked under *Configure → TV app control*, or the Android Debug Bridge entity is unavailable (see the note in step 7) |
+| Controls are *unavailable* | The app hasn't reported to HA yet: check the HA URL and webhook ID in the app, and that *Home Assistant may change settings over Wi-Fi* is ON. (*Grant TV permissions* needs step 7.) |
 | An app shows *did not provide album art* | That app doesn't share artwork. Set **Colour source mode** to *Auto* and turn on **Screen capture** |
 | Energy strip shows still colours | **Audio** says *Not listening* or the TV hears silence: grant audio access (step 10), or HDMI passthrough is on (use the phone, step 11) |
-| Phone doesn't find the TV | Same Wi-Fi, not a guest network, and no "AP / client isolation" on the router. **Device link** on on both |
+| Phone doesn't find the TV | Same Wi-Fi, not a guest network, and no "AP / client isolation" on the router. **Device link** on on both, same **Room** for sharing the beat |
+| Colours change late | Update to v0.7: the WLEDs now get the colours first. If *Last:* in the app shows an HA error, the device can't reach Home Assistant |
 
 From the Mac, the app's own summary:
 ```bash
@@ -291,6 +305,10 @@ And a live log: `adb logcat -s MusicLightSynk` (Ctrl+C to stop).
    ```
 2. **Integration:** HACS shows an update. Click **Update**, then restart HA. Settings are kept.
    (Blueprint users: re-import the blueprint, then *Developer tools → YAML → Reload automations*.)
+
+**Coming from v0.6:** each device now keeps its own WLED list (no more copying between TV and
+phone): check the phone's list. Set a **Room** on the phone if it's somewhere else, and pick
+**Listen to** (Auto is gone). In Home Assistant the phone can now have its own device (step 11).
 
 **Coming from v0.5:** nothing to redo. Install the new APK and update the integration; the new
 controls appear by themselves. Part C sets up the Energy effect and the phone.

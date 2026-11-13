@@ -46,6 +46,7 @@ class MainActivity : Activity() {
     private lateinit var linkChip: TextView
     private lateinit var hearingStatus: TextView
     private lateinit var linkStatus: TextView
+    private lateinit var controlStatus: TextView
     private lateinit var nowTitle: TextView
     private lateinit var nowApp: TextView
     private lateinit var resultStatus: TextView
@@ -161,12 +162,19 @@ class MainActivity : Activity() {
 
         cardOf(
             right, "Beat & audio",
-            "Energy bars and the beat pulse listen to the music. Device audio works on Fire TV unless HDMI passthrough (Dolby/DTS to a soundbar) is on.",
+            "Energy bars and the beat pulse listen to the music, from exactly the source you pick here (it never switches by itself). " +
+                "Device audio: what this device plays (Fire TV; not with HDMI passthrough to a soundbar). Microphone: music from any speaker in the room.",
         ).apply {
             hearingStatus = text("", 13f, muted).also { addView(it) }
             addView(toggleButton({ "Listen to: ${prefs.audioSource.label}" }) {
-                prefs.audioSource = prefs.audioSource.next()
-                if (prefs.audioSource != AudioSource.OFF) ensureAudioPermission()
+                val next = prefs.audioSource.next().let { if (it == AudioSource.MIC && !ListenerService.isSupported(this@MainActivity)) it.next() else it }
+                prefs.audioSource = next
+                if (next != AudioSource.OFF) ensureAudioPermission()
+                if (next != AudioSource.MIC && prefs.listenerEnabled) {
+                    prefs.listenerEnabled = false
+                    ListenerService.stop(this@MainActivity)
+                    toast("Backup listener off: it needs the microphone")
+                }
             }, fullWidth())
             stepper(this, "Sensitivity", "%", 10, Prefs.SENSITIVITY_RANGE, { prefs.energySensitivityPct }, { prefs.energySensitivityPct = it })
             stepper(this, "Blur", "", 1, Prefs.BLUR_RANGE, { prefs.energyBlur }, { prefs.energyBlur = it })
@@ -178,23 +186,33 @@ class MainActivity : Activity() {
             stepper(this, "Pulse strength", "%", 10, 10..100, { prefs.pulseStrengthPct }, { prefs.pulseStrengthPct = it })
         }
 
-        cardOf(right, "Other devices", "The app on your TV and phone share colours and the beat over Wi-Fi, and take turns driving the WLED strips.").apply {
+        cardOf(
+            right, "Other devices",
+            "Every device drives its own WLED list. Devices only take turns on a WLED they both list, and only devices in the " +
+                "same room share the beat and album colours. Give the phone another room name to keep it completely separate.",
+        ).apply {
             linkStatus = text("", 13f, muted).also { addView(it) }
             addView(toggleButton({ "Device link: " + onOff(prefs.linkEnabled) }) { prefs.linkEnabled = !prefs.linkEnabled }, fullWidth())
+            field(this, "Room", "Home",
+                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS, { prefs.room }, { prefs.room = it })
             field(this, "This device's name", android.os.Build.MODEL ?: "",
                 InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS, { prefs.deviceName }, { prefs.deviceName = it })
             if (ListenerService.isSupported(this@MainActivity)) {
                 addView(text(
-                    "Backup listener: this phone's mic hears music played elsewhere (iPhone, PC, ...) and drives the strips to the " +
-                        "beat, in the last album's colours. It gives way whenever a device playing music takes over.",
+                    "Backup listener: keeps this phone's mic on, so its WLEDs bounce to music played anywhere nearby (iPhone, PC, ...), " +
+                        "in the last album's colours. Uses the microphone as audio source.",
                     12f, muted,
                 ))
                 addView(toggleButton({ "Backup listener (mic): " + onOff(prefs.listenerEnabled) }) { toggleListener() }, fullWidth())
             }
-            addView(button("Save name", primary = true) { saveFields(silent = false) }, fullWidth())
+            addView(button("Save room and name", primary = true) { saveFields(silent = false) }, fullWidth())
         }
 
         cardOf(right, "Home Assistant").apply {
+            controlStatus = text("", 13f, muted).also { addView(it) }
+            addView(toggleButton({ "Home Assistant may change settings over Wi-Fi: " + onOff(prefs.controlEnabled) }) {
+                prefs.controlEnabled = !prefs.controlEnabled
+            }, fullWidth())
             field(this, "Home Assistant URL", "http://192.168.1.10:8123",
                 InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI,
                 { prefs.haUrl }, { prefs.haUrl = it })
@@ -351,8 +369,6 @@ class MainActivity : Activity() {
                 val mirrorBtn = button("Mirror: " + onOff(e.mirror)) {
                     updateDevice(i, 5) { it.copy(effect = it.effect.copy(mirror = !it.effect.mirror)) }
                 }
-                flipBtn.isEnabled = e.energy
-                mirrorBtn.isEnabled = e.energy
                 fx.addView(energyBtn, weighted(1.2f))
                 fx.addView(flipBtn, weighted(1f))
                 fx.addView(mirrorBtn, weighted(1f))
@@ -364,7 +380,7 @@ class MainActivity : Activity() {
             }
             wledList.addView(block, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(8) })
             if (i == focusIndex) {
-                val target = roles[focusRole]?.takeIf { it.isEnabled } ?: zoneBtn
+                val target = roles[focusRole] ?: zoneBtn
                 target.post { target.requestFocus() }
             }
         }
@@ -690,14 +706,20 @@ class MainActivity : Activity() {
         hearingStatus.text = when (s.audio) {
             AudioEngine.SRC_OUTPUT -> "Hearing: device audio"
             AudioEngine.SRC_MIC -> "Hearing: microphone"
-            else -> "Not listening right now. Starts when music plays and an Energy / pulse strip or another device needs it."
+            else -> if (prefs.audioSource == AudioSource.OFF) "Audio is off" else "Not listening right now: starts when music plays here, or with the backup listener"
         }
         linkStatus.text = if (!prefs.linkEnabled) {
             "Link is off: this device works on its own."
         } else {
-            "Found: " + s.peers.joinToString(", ").ifEmpty { "no other devices yet" } +
-                "\nWLED strips driven by: " + (s.renderer ?: "nobody right now") +
+            "Room: ${prefs.room}. Found: " + s.peers.joinToString(", ").ifEmpty { "no other devices yet" } +
+                "\nThis device's WLEDs are driven by: " + (s.renderer ?: "nobody right now") +
                 if (s.listening) "\nBackup listener is on" else ""
+        }
+        controlStatus.text = when {
+            !prefs.controlEnabled -> "Wi-Fi control is off: Home Assistant can only change settings over ADB (Fire TV)."
+            s.controlUrl == null -> "Wi-Fi control: waiting for a Wi-Fi address"
+            else -> "Home Assistant controls this device over Wi-Fi at ${s.controlUrl} (no ADB needed). " +
+                "It learns the address from the app, so set the URL and webhook below."
         }
         val parts = s.nowPlaying.split(": ", limit = 2)
         nowApp.text = if (parts.size == 2) parts[0] else ""
@@ -756,6 +778,10 @@ class MainActivity : Activity() {
             ListenerService.stop(this)
             return
         }
+        if (prefs.audioSource != AudioSource.MIC) {
+            prefs.audioSource = AudioSource.MIC // the listener hears through the mic; one source at a time
+            settingsTouched()
+        }
         val hadMic = ListenerService.hasMicPermission(this)
         ensureAudioPermission(forListener = true) // without the mic permission it starts in onRequestPermissionsResult
         if (hadMic && !ListenerService.start(this)) toast("Could not start the backup listener")
@@ -794,7 +820,8 @@ class MainActivity : Activity() {
     companion object {
         private const val ADB_HELP =
             "Home Assistant: the Music Light Synk integration can change every\n" +
-                "setting here through the Android Debug Bridge integration.\n\n" +
+                "setting here over Wi-Fi (or, on a Fire TV, through the Android\n" +
+                "Debug Bridge integration).\n\n" +
                 "From a computer:\n" +
                 "adb connect <fire-tv-ip>\n" +
                 "adb shell cmd notification allow_listener \\\n" +

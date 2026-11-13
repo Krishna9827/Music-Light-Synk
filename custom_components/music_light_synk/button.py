@@ -45,7 +45,7 @@ class TestLightsButton(MusicLightSynkEntity, ButtonEntity):
 
 
 class TvCommandButton(TvAppEntity, ButtonEntity):
-    """Runs one command on the TV through ADB."""
+    """Runs one command on the app (over Wi-Fi, or ADB on a Fire TV)."""
 
     _attr_entity_category = EntityCategory.CONFIG
 
@@ -54,6 +54,12 @@ class TvCommandButton(TvAppEntity, ButtonEntity):
         self._attr_name = name
         self._attr_icon = icon
         self._method = method
+
+    @property
+    def available(self) -> bool:
+        app = self._entry.runtime_data.app
+        # Android only lets the ADB shell grant these permissions.
+        return app.adb_available if self._method == "grant_permissions" else app.available
 
     async def async_press(self) -> None:
         await getattr(self._entry.runtime_data.app, self._method)()

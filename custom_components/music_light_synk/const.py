@@ -92,6 +92,9 @@ def signal_update(entry_id: str) -> str:
 # ---- TV app control through Home Assistant's Android Debug Bridge integration ---------------
 
 CONF_ADB_ENTITY = "adb_entity"
+# Where the app said it can be controlled over Wi-Fi (saved in the entry's data).
+CONF_CONTROL_URL = "control_url"
+CONF_CONTROL_TOKEN = "control_token"
 
 APP_PACKAGE = "com.musiclightsynk"
 APP_RECEIVER = f"{APP_PACKAGE}/.AdbCommandReceiver"
@@ -99,8 +102,8 @@ APP_LISTENER = f"{APP_PACKAGE}/{APP_PACKAGE}.MediaListenerService"
 
 SOURCE_MODES = ["auto", "artwork", "screen"]
 
-# Where Energy strips / beat pulse get their audio: device output, microphone, or off.
-AUDIO_SOURCES = ["auto", "output", "mic", "off"]
+# Where Energy strips / beat pulse get their audio: exactly one, never switched by the app.
+AUDIO_SOURCES = ["output", "mic", "off"]
 
 
 @dataclass(frozen=True)

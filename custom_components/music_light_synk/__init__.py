@@ -4,7 +4,8 @@ The app POSTs a JSON payload to a Home Assistant webhook on every track change. 
 integration owns that webhook and
  - drives the lights you picked for each zone of the artwork (no blueprint needed),
  - exposes the colours / now playing / playing / app status as entities,
- - controls the TV app's settings through Home Assistant's Android Debug Bridge integration,
+ - controls the app's settings over Wi-Fi (phones and TVs), or through Home Assistant's Android
+   Debug Bridge integration on a Fire TV,
  - re-fires every payload on the event bus as ``music_light_synk_event``.
 """
 
@@ -23,8 +24,8 @@ from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from .app_control import AppControl
-from .const import CONF_ADB_ENTITY, DOMAIN, EVENT_NAME, signal_update
+from .app_control import AppControl, valid_control_url
+from .const import CONF_ADB_ENTITY, CONF_CONTROL_TOKEN, CONF_CONTROL_URL, DOMAIN, EVENT_NAME, signal_update
 from .light_control import LightController
 
 _LOGGER = logging.getLogger(__name__)
@@ -92,7 +93,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MusicLightSynkConfigEntr
     """Register the webhook and set up entities."""
     entry.runtime_data = MusicLightSynkData(
         lights=LightController(hass, lambda: entry.options),
-        app=AppControl(hass, lambda: entry.options),
+        app=AppControl(hass, lambda: entry.options, lambda: entry.data),
         adb_entity=entry.options.get(CONF_ADB_ENTITY),
     )
     webhook_id: str = entry.data[CONF_WEBHOOK_ID]
@@ -106,6 +107,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MusicLightSynkConfigEntr
             return web.Response(status=400, text="body must be JSON")
         if not isinstance(data, dict):
             return web.Response(status=400, text="body must be a JSON object")
+        _remember_control(hass, entry, data.pop("control", None))
         entry.runtime_data.apply(data)
         entry.runtime_data.lights.handle(data)  # ignores "status" payloads
         async_dispatcher_send(hass, signal_update(entry.entry_id))
@@ -132,7 +134,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MusicLightSynkConfigEntr
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
-    if entry.runtime_data.app.adb_entity:
+    if entry.runtime_data.app.adb_entity or entry.runtime_data.app.control_url:
         # Ask the app for its current settings so the controls show real values.
         async def _ask_status(*_: Any) -> None:
             try:
@@ -147,6 +149,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: MusicLightSynkConfigEntr
 
     _LOGGER.debug("Music Light Synk listening on webhook %s", webhook_id)
     return True
+
+
+def _remember_control(hass: HomeAssistant, entry: MusicLightSynkConfigEntry, control: Any) -> None:
+    """The app says where it can be controlled over Wi-Fi: keep it (survives restarts)."""
+    if not isinstance(control, dict):
+        return
+    url, token = control.get("url"), control.get("token")
+    if not valid_control_url(url) or not isinstance(token, str) or not token:
+        return
+    if entry.data.get(CONF_CONTROL_URL) == url and entry.data.get(CONF_CONTROL_TOKEN) == token:
+        return
+    _LOGGER.debug("App reachable over Wi-Fi at %s", url)
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_CONTROL_URL: url, CONF_CONTROL_TOKEN: token})
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: MusicLightSynkConfigEntry) -> None:

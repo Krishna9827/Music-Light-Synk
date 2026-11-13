@@ -49,7 +49,7 @@ class MusicLightSynkEntity(Entity):
 
 
 class TvAppEntity(MusicLightSynkEntity):
-    """A TV app setting/command sent through ADB; its state comes from the app's status reports."""
+    """An app setting/command (sent over Wi-Fi or ADB); its state comes from the app's status reports."""
 
     @property
     def available(self) -> bool:

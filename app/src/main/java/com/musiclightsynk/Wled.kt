@@ -667,6 +667,20 @@ class WledController(udpPort: Int = WledPackets.UDP_PORT) {
     private val saved = HashMap<String, JSONObject>()
     private val ledCounts = HashMap<String, Int>()
     private val restoreExec = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "mls-wled-restore").apply { isDaemon = true } }
+    private val jsonExec = Executors.newFixedThreadPool(4) { r -> Thread(r, "mls-wled-json").apply { isDaemon = true } }
+
+    /** Run [fn] for every item at once (one slow or offline WLED must not hold up the others). */
+    private fun <T, R> parallel(items: List<T>, fn: (T) -> R): List<R?> {
+        val futures = items.map { item -> jsonExec.submit<R> { fn(item) } }
+        return futures.map { f ->
+            try {
+                f.get(JSON_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            } catch (e: Exception) {
+                f.cancel(true)
+                null
+            }
+        }
+    }
 
     fun onColors(cfg: WledConfig, palette: Palette, sessionStart: Boolean, preview: Boolean = false): Result {
         val strips = LinkedHashMap<String, WledAmbient.Strip>()
@@ -693,32 +707,35 @@ class WledController(udpPort: Int = WledPackets.UDP_PORT) {
 
         if (json.isNotEmpty() && cfg.restore && (sessionStart || preview)) {
             synchronized(this) {
-                for (d in json) if (d.host !in saved) WledJson.getState(d.host)?.let { saved[d.host] = it }
+                val toSave = json.filter { it.host !in saved }
+                parallel(toSave) { WledJson.getState(it.host) }.forEachIndexed { i, st -> if (st != null) saved[toSave[i].host] = st }
             }
         }
         val parts = ArrayList<String>()
         var ok = strips.isNotEmpty()
         if (strips.isNotEmpty()) parts += "realtime x${strips.size}"
-        for (d in json) {
-            val r = WledJson.post(d.host, bodyFor(d.zone, palette, cfg.brightness))
-            if (r.ok) ok = true
-            parts += "${d.host} ${r.message}"
+        val results = parallel(json) { d -> WledJson.post(d.host, bodyFor(d.zone, palette, cfg.brightness)) }
+        json.forEachIndexed { i, d ->
+            val r = results[i]
+            if (r?.ok == true) ok = true
+            parts += "${d.host} ${r?.message ?: "timed out"}"
         }
         parts += notes
         if (preview && json.isNotEmpty()) restoreExec.schedule({ restoreAll() }, PREVIEW_MS, TimeUnit.MILLISECONDS)
         return Result(ok, "WLED " + parts.joinToString(", ").ifEmpty { "no devices" })
     }
 
-    /** True while WLED states saved at session start are waiting to be put back. */
-    val hasSavedState: Boolean
-        @Synchronized get() = saved.isNotEmpty()
-
     /** Audio levels for Energy strips. Any thread. */
     fun audio(levels: AudioLevels) = ambient.audio(levels)
 
-    fun onStopped(cfg: WledConfig): Result {
+    /**
+     * Music stopped: let go of every strip and put JSON devices back as they were, except
+     * [othersDrive] (normalised hosts another device has taken over; their old state is dropped).
+     */
+    fun onStopped(cfg: WledConfig, othersDrive: Set<String> = emptySet()): Result {
         ambient.stop()
-        if (cfg.restore) return restoreAll() // no-op unless a JSON device saved a state
+        if (cfg.restore) return restoreAll(othersDrive) // no-op unless a JSON device saved a state
+        synchronized(this) { saved.clear() }
         return Result(true, "WLED released")
     }
 
@@ -735,10 +752,11 @@ class WledController(udpPort: Int = WledPackets.UDP_PORT) {
     }
 
     @Synchronized
-    private fun restoreAll(): Result {
+    private fun restoreAll(skip: Set<String> = emptySet()): Result {
         if (saved.isEmpty()) return Result(true, "WLED nothing to restore")
         val msgs = ArrayList<String>()
         for ((host, state) in saved) {
+            if (LinkProtocol.normHost(host) in skip) continue
             msgs += WledJson.post(host, WledJson.restoreBody(state)).message
             val pl = state.optInt("pl", -1)
             if (pl >= 0) WledJson.post(host, JSONObject().put("ps", pl)) // resume the playlist
@@ -749,6 +767,7 @@ class WledController(udpPort: Int = WledPackets.UDP_PORT) {
 
     companion object {
         const val PREVIEW_MS = 6000L
+        private const val JSON_TIMEOUT_MS = 6500L
 
         /** A light colour scaled by its own brightness and the master brightness, as sent over UDP. */
         fun scaled(c: LightColor, master: Float): Rgb {

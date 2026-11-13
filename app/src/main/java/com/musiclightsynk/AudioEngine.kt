@@ -18,9 +18,8 @@ import kotlin.concurrent.thread
 import kotlin.math.max
 import kotlin.math.min
 
-/** Where the Energy effect and the beat pulse get their audio from. */
+/** Where the Energy effect and the beat pulse get their audio from: exactly one, never switched for you. */
 enum class AudioSource(val key: String, val label: String) {
-    AUTO("auto", "Auto (device audio, else mic)"),
     OUTPUT("output", "Device audio"),
     MIC("mic", "Microphone"),
     OFF("off", "Off");
@@ -28,7 +27,8 @@ enum class AudioSource(val key: String, val label: String) {
     fun next(): AudioSource = values()[(ordinal + 1) % values().size]
 
     companion object {
-        fun of(key: String?): AudioSource = values().firstOrNull { it.key.equals(key?.trim(), ignoreCase = true) } ?: AUTO
+        /** Null for anything else (e.g. v0.6's "auto"): the caller picks the device's default. */
+        fun of(key: String?): AudioSource? = values().firstOrNull { it.key.equals(key?.trim(), ignoreCase = true) }
     }
 }
 
@@ -40,8 +40,9 @@ enum class AudioSource(val key: String, val label: String) {
  *    mixer, and some phones hand it silence.
  *  - Microphone: a phone near the speakers. In the background this only works while
  *    [ListenerService] (a microphone foreground service) runs.
- *  - Auto: device audio first; if that's unavailable or silent for a few seconds, the mic
- *    (when there is one and it's allowed).
+ *
+ * It stays on the source it was given: if that hears nothing, it says so (status note) instead
+ * of switching by itself.
  *
  * [start] / [stop] on the main thread. [onLevels] is called on the main thread (device audio)
  * or the mic thread, 20-45 times a second, with silent = true while nothing is heard.
@@ -51,7 +52,6 @@ class AudioEngine(
     private val onStatus: (String) -> Unit,
 ) {
     private val main = Handler(Looper.getMainLooper())
-    private var ctx: Context? = null
     private var requested = AudioSource.OFF
     private var viz: Visualizer? = null
 
@@ -97,16 +97,11 @@ class AudioEngine(
         val now = SystemClock.elapsedRealtime()
         if (source == failedSource && now - failedAt < RETRY_MS) return // don't hammer a source that just failed
         stop()
-        ctx = context.applicationContext
         requested = source
         startedAt = SystemClock.elapsedRealtime()
         lastSound = startedAt
         silenceReported = false
-        val ok = when (source) {
-            AudioSource.MIC -> startMic(context)
-            AudioSource.OUTPUT -> startOutput(context)
-            else -> startOutput(context) || startMic(context)
-        }
+        val ok = if (source == AudioSource.MIC) startMic(context) else startOutput(context)
         if (ok) {
             failedSource = null
             main.postDelayed(watchdog, WATCHDOG_MS)
@@ -115,6 +110,12 @@ class AudioEngine(
             failedSource = source
             failedAt = now
         }
+    }
+
+    /** Settings or permissions changed: allow an immediate retry of a source that failed. */
+    fun resetFailures() {
+        failedSource = null
+        lastStatus = null
     }
 
     private fun report(msg: String) {
@@ -133,23 +134,13 @@ class AudioEngine(
 
     private val watchdog = object : Runnable {
         override fun run() {
-            val c = ctx ?: return
             if (!isRunning) return
-            val now = SystemClock.elapsedRealtime()
-            val quietFor = now - lastSound
-            if (requested == AudioSource.AUTO && active == SRC_OUTPUT && quietFor > AUTO_SWITCH_MS && micAllowed(c)) {
-                Log.i(TAG, "Device audio is silent; listening with the microphone instead")
-                stopOutput()
-                if (!startMic(c)) {
-                    startOutput(c) // no luck with the mic either: keep trying the output
-                } else {
-                    lastSound = now
-                }
-            } else if (!silenceReported && quietFor > SILENCE_REPORT_MS) {
+            val quietFor = SystemClock.elapsedRealtime() - lastSound
+            if (!silenceReported && quietFor > SILENCE_REPORT_MS) {
                 silenceReported = true
                 report(
                     if (active == SRC_MIC) "Microphone hears silence (blocked in the background, or too far from the speakers)"
-                    else "Device audio is silent: this app blocks audio analysis, or HDMI passthrough is on",
+                    else "Device audio is silent: this app blocks audio analysis, or HDMI passthrough is on. Try the microphone",
                 )
             }
             main.postDelayed(this, WATCHDOG_MS)
@@ -194,7 +185,7 @@ class AudioEngine(
         } catch (e: Throwable) {
             Log.w(TAG, "Visualizer unavailable", e)
             stopOutput()
-            if (requested == AudioSource.OUTPUT) report("Device audio unavailable: ${e.message ?: e.javaClass.simpleName}")
+            report("Device audio unavailable here: ${e.message ?: e.javaClass.simpleName}. Try the microphone")
             false
         }
     }
@@ -221,7 +212,7 @@ class AudioEngine(
     @SuppressLint("MissingPermission") // checked in micAllowed()
     private fun startMic(c: Context): Boolean {
         if (!micAllowed(c)) {
-            if (requested == AudioSource.MIC) report("No microphone, or the microphone permission is off")
+            report("No microphone, or the microphone permission is off")
             return false
         }
         val minBuf = AudioRecord.getMinBufferSize(MIC_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
@@ -301,7 +292,6 @@ class AudioEngine(
         private const val MIC_RATE = 44100
         private const val MIC_N = 1024
         private const val WATCHDOG_MS = 1000L
-        private const val AUTO_SWITCH_MS = 4000L
         private const val SILENCE_REPORT_MS = 8000L
         private const val RETRY_MS = 30_000L
     }
