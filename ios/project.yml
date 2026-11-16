@@ -1,0 +1,46 @@
+# XcodeGen spec for the iPhone app: `brew install xcodegen && xcodegen` in this folder makes
+# MusicLightSynk.xcodeproj (the release zip already contains it). Open it in Xcode, pick your
+# Apple ID under Signing & Capabilities, plug in the iPhone and press Run.
+name: MusicLightSynk
+options:
+  bundleIdPrefix: com.musiclightsynk
+  deploymentTarget:
+    iOS: "16.0"
+packages:
+  MusicLightSynkPackage:
+    path: ../apple
+schemes:
+  MusicLightSynkiOS:
+    build:
+      targets:
+        MusicLightSynkiOS: all
+targets:
+  MusicLightSynkiOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    dependencies:
+      - package: MusicLightSynkPackage
+        product: MusicLightSynkCore
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Music Light Synk
+        CFBundleShortVersionString: "0.10.0"
+        CFBundleVersion: "10"
+        UILaunchScreen: {}
+        UIBackgroundModes: [audio]
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSMicrophoneUsageDescription: Music Light Synk listens to the music so your lights can move with the beat. Nothing is recorded or sent anywhere.
+        NSAppleMusicUsageDescription: Music Light Synk reads what Apple Music plays, to colour your lights with the album art.
+        NSLocalNetworkUsageDescription: Music Light Synk talks to your WLED lights and Home Assistant on your home network.
+    settings:
+      base:
+        PRODUCT_NAME: Music Light Synk
+        PRODUCT_BUNDLE_IDENTIFIER: com.musiclightsynk.ios
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.0"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+        ENABLE_PREVIEWS: NO

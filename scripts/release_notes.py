@@ -11,7 +11,11 @@ body = match.group(1).strip() if match else f"Music Light Synk v{version}"
 print(body)
 print(
     "\n---\n**Install / update**\n"
-    "- **TV app:** download `music-light-synk.apk` below, then `adb install -r music-light-synk.apk`.\n"
+    "- **TV / Android app:** download `music-light-synk.apk` below, then `adb install -r music-light-synk.apk`.\n"
+    "- **Mac:** download `music-light-synk-mac.zip`, unzip, move *Music Light Synk* to Applications "
+    "(first launch: System Settings → Privacy & Security → Open Anyway).\n"
+    "- **iPhone:** download `music-light-synk-iphone-project.zip`, open `ios/MusicLightSynk.xcodeproj` in Xcode, "
+    "pick your Apple ID under Signing, Run on the iPhone.\n"
     "- **Home Assistant:** HACS → Music Light Synk → Update (or copy `music_light_synk.zip` "
     "into `config/custom_components/`).\n"
 )

@@ -7,3 +7,10 @@ local.properties
 captures/
 .kotlin/
 *.apk
+
+# Apple builds
+build/
+apple/.build/
+apple/.swiftpm/
+ios/*.xcodeproj/
+ios/Info.plist

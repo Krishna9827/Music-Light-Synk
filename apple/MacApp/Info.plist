@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.musiclightsynk.mac</string>
+    <key>CFBundleName</key>
+    <string>Music Light Synk</string>
+    <key>CFBundleDisplayName</key>
+    <string>Music Light Synk</string>
+    <key>CFBundleExecutable</key>
+    <string>MusicLightSynk</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__VERSION__</string>
+    <key>CFBundleVersion</key>
+    <string>__BUILD__</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Music Light Synk listens to the music so your lights can move with the beat. Nothing is recorded or sent anywhere.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Music Light Synk asks Spotify, Music and your browser what's playing, to colour your lights with the album art.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Music Light Synk talks to your WLED lights, Home Assistant and the app on your TV and phone on your home network.</string>
+</dict>
+</plist>

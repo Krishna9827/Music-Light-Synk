@@ -60,11 +60,56 @@ jobs:
           test "$APP" = "$HA"
           grep -q "^## v$APP" CHANGELOG.md || { echo "CHANGELOG.md has no '## v$APP' section"; exit 1; }
 
+  # Mac app + iPhone app (Swift). Core tests, the universal Mac app, and the iPhone app built
+  # for the simulator (proves it compiles; you sign and install it from Xcode with your Apple ID).
+  apple:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: v
+        run: |
+          echo "version=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' app/build.gradle.kts)" >> "$GITHUB_OUTPUT"
+          echo "code=$(sed -n 's/.*versionCode = \([0-9]*\).*/\1/p' app/build.gradle.kts)" >> "$GITHUB_OUTPUT"
+
+      - name: Core tests (Swift)
+        working-directory: apple
+        run: swift test
+
+      - name: Mac app
+        run: |
+          chmod +x scripts/build_mac_app.sh
+          scripts/build_mac_app.sh "${{ steps.v.outputs.version }}" "${{ steps.v.outputs.code }}" build/music-light-synk-mac.zip
+
+      - name: iPhone app (simulator build) and Xcode project zip
+        run: |
+          brew install xcodegen
+          V="${{ steps.v.outputs.version }}"; C="${{ steps.v.outputs.code }}"
+          sed -i '' -e "s/CFBundleShortVersionString: \".*\"/CFBundleShortVersionString: \"$V\"/" -e "s/CFBundleVersion: \".*\"/CFBundleVersion: \"$C\"/" ios/project.yml
+          (cd ios && xcodegen generate)
+          xcodebuild -quiet -project ios/MusicLightSynk.xcodeproj -scheme MusicLightSynkiOS -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' -derivedDataPath build/ios-dd CODE_SIGNING_ALLOWED=NO build
+          STAGE="build/Music Light Synk iPhone"
+          rm -rf "$STAGE" && mkdir -p "$STAGE/apple"
+          cp -R ios "$STAGE/ios"
+          cp -R apple/Package.swift apple/Sources "$STAGE/apple/"
+          (cd build && zip -qr music-light-synk-iphone-project.zip "Music Light Synk iPhone")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: music-light-synk-apple
+          path: |
+            build/music-light-synk-mac.zip
+            build/music-light-synk-iphone-project.zip
+          if-no-files-found: error
+
   # On main: publish a GitHub Release (APK, integration zip, blueprints) whenever the version
   # is new. Bump versionName + manifest version + CHANGELOG to cut the next release.
   release:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [apk, home-assistant]
+    needs: [apk, home-assistant, apple]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -87,6 +132,11 @@ jobs:
         with:
           name: music-light-synk-apk
 
+      - uses: actions/download-artifact@v4
+        if: steps.v.outputs.new == 'true'
+        with:
+          name: music-light-synk-apple
+
       - name: Release notes and integration zip
         if: steps.v.outputs.new == 'true'
         run: |
@@ -105,6 +155,8 @@ jobs:
           make_latest: true
           files: |
             music-light-synk.apk
+            music-light-synk-mac.zip
+            music-light-synk-iphone-project.zip
             music_light_synk.zip
             music_light_synk_blueprint.yaml
             music_light_synk_mqtt_blueprint.yaml
