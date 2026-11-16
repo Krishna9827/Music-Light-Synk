@@ -16,6 +16,8 @@ public final class Engine {
         public var peers: [String] = []
         public var renderer: String?
         public var controlURL: String?
+
+        public init() {}
     }
 
     static let changeThreshold = 18
