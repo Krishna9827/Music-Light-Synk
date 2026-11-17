@@ -1,8 +1,27 @@
 # Changelog
 
-One version number for the whole project: the TV app (APK) and the Home Assistant
-integration are released together. Every release on GitHub has the APK, the integration zip
-and both blueprints attached.
+One version number for the whole project: the TV app (APK), the Mac and iPhone apps and the
+Home Assistant integration are released together. Every release on GitHub has the APK, the Mac
+app, the iPhone Xcode project, the integration zip and both blueprints attached.
+
+## v0.10.0
+
+**Mac and iPhone apps** (a first, smaller version; the TV and Android apps are unchanged):
+- **Mac menu-bar app** (`music-light-synk-mac.zip`, macOS 13+, Apple silicon and Intel): album-art
+  colours from **Spotify**, **Apple Music** and **YouTube Music** in Safari / Chrome / Edge / Brave;
+  the **microphone** for the beat; WLED (parts, ambient gradient, Energy with Flip / Mirror) and
+  Home Assistant lights (colours, Beat pulse, Energy, Energy bars); the same **Mode** choices as
+  the phone. It joins the device link, so the TV can use **the Mac's microphone** by name, and
+  Home Assistant controls it over Wi-Fi like the phone.
+- **iPhone app** (`music-light-synk-iphone-project.zip`, iOS 16+, built and installed with Xcode
+  and a free Apple ID): the **microphone** keeps the lights moving to the beat, also with the
+  screen locked; **Apple Music** songs bring their album colours (iOS doesn't share other apps'
+  artwork); WLED and Home Assistant lights; Home Assistant control while the app runs. No device
+  link on iPhone yet.
+- Both use the same Home Assistant integration: add it once more with the device's own webhook ID.
+- Not yet: the Mac's sound output as audio source (it uses the mic), MQTT and per-app profiles on
+  Mac / iPhone.
+- Guide: [docs/SETUP-APPLE.md](https://github.com/Krishna9827/Music-Light-Synk/blob/main/docs/SETUP-APPLE.md).
 
 ## v0.9.0
 

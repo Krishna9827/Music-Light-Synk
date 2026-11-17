@@ -21,6 +21,12 @@ else (an iPhone, a PC on the speakers) and keeps its strips moving to the beat. 
 hear its own audio (HDMI passthrough to a soundbar) can use **the phone's microphone**, picked by
 name in the app or in Home Assistant. And Home Assistant lights can **pulse to the beat** too.
 
+**Mac and iPhone** (new, a first smaller version): a menu-bar app for the Mac reads what Spotify,
+Apple Music and YouTube Music (in Safari / Chrome / Edge / Brave) play, and listens through the
+microphone for the beat. The iPhone app listens through the mic (also with the screen locked) and
+colours by Apple Music's album art. Both drive WLED and Home Assistant lights like the TV app and
+use the same integration. See [docs/SETUP-APPLE.md](docs/SETUP-APPLE.md).
+
 No Raspberry Pi, no HDMI grabber, and no continuous colour stream, so slow cloud bulbs like Tuya
 keep up.
 
@@ -57,6 +63,8 @@ on the same Wi-Fi as the TV, just for the one-time setup.
 
 **On a Mac? Follow [docs/SETUP-MAC.md](docs/SETUP-MAC.md).** It's every step as copy-paste
 commands, with no script or git clone needed.
+
+**No Fire TV, just a Mac or an iPhone?** Skip to [docs/SETUP-APPLE.md](docs/SETUP-APPLE.md).
 
 1. **Get the APK** from the [latest release](https://github.com/Krishna9827/Music-Light-Synk/releases/latest)
    (`music-light-synk.apk`). Every release also has the integration zip and both blueprints.
@@ -547,6 +555,11 @@ The app already sends at most one update per track. The rest of the lag is Tuya'
   table that it and the ADB receiver share.
 - `SyncEngine` drives WLED on its own thread the moment colours are known; Home Assistant and MQTT
   go out on a separate network thread, so a slow server never delays the lights.
+- `apple/`: a Swift package with the same engine for macOS 13+ and iOS 16+ (`MusicLightSynkCore`:
+  colours, audio, Energy, WLED, link, control API, Home Assistant payloads, all on Foundation and
+  BSD sockets), the Mac menu-bar app (`MusicLightSynkMac`: now playing through AppleScript, the mic
+  through AVAudioEngine) and `ios/`, the iPhone app (XcodeGen project). Same settings keys, same
+  link protocol and same HA schema as the Android app, so they mix freely.
 - Everything is plain Android framework code (no AndroidX, no libraries), minSdk 25 (Fire OS 6+),
   targetSdk 34. MQTT, WLED, colour extraction and payloads are framework-free Kotlin, so they
   are unit tested on the JVM.
@@ -565,6 +578,10 @@ The app already sends at most one update per track. The rest of the lag is Tuya'
   shared strip, newest player wins, ties, expiry, older apps), rooms, and two link sockets finding
   each other and talking. For Wi-Fi control: ping, token checks, configure, unknown actions,
   value coercion.
+- `swift test` in `apple/`: the Swift core against the same expectations (colours equal to the
+  Kotlin extractor's, bands, meter, WLED specs, Energy directions, DNRGB packets, link messages
+  incl. an Android `hi`, the per-WLED election, UDP loopback, settings, the control API's token).
+  CI runs it on macOS and builds the Mac app and the iPhone app (simulator).
 - CI (`.github/workflows/build.yml`) builds the signed APK, checks both blueprints, checks the
   MQTT blueprint is regenerated (`scripts/build_blueprints.py --check`) and byte-compiles the integration.
   `validate.yml` runs Home Assistant's **hassfest** and the **HACS** validator.

@@ -13,6 +13,9 @@ You'll need two IP addresses. Replace these examples everywhere below:
 
 **Already set up an older version?** Jump to [Updating](#updating-already-set-up).
 
+**Want the lights to follow the Mac itself (or your iPhone)?** That's the Mac / iPhone app:
+[SETUP-APPLE.md](SETUP-APPLE.md).
+
 ---
 
 ## Part A: the Fire TV (from the Mac)

@@ -94,7 +94,7 @@ jobs:
           STAGE="build/Music Light Synk iPhone"
           rm -rf "$STAGE" && mkdir -p "$STAGE/apple"
           cp -R ios "$STAGE/ios"
-          cp -R apple/Package.swift apple/Sources "$STAGE/apple/"
+          cp -R apple/Package.swift apple/Sources apple/Tests "$STAGE/apple/"
           (cd build && zip -qr music-light-synk-iphone-project.zip "Music Light Synk iPhone")
 
       - uses: actions/upload-artifact@v4
