@@ -82,6 +82,7 @@ jobs:
         run: |
           chmod +x scripts/build_mac_app.sh
           scripts/build_mac_app.sh "${{ steps.v.outputs.version }}" "${{ steps.v.outputs.code }}" build/music-light-synk-mac.zip
+          test -s build/music-light-synk-mac.zip
 
       - name: iPhone app (simulator build) and Xcode project zip
         run: |
@@ -96,6 +97,7 @@ jobs:
           cp -R ios "$STAGE/ios"
           cp -R apple/Package.swift apple/Sources apple/Tests "$STAGE/apple/"
           (cd build && zip -qr music-light-synk-iphone-project.zip "Music Light Synk iPhone")
+          test -s build/music-light-synk-iphone-project.zip
 
       - uses: actions/upload-artifact@v4
         with:

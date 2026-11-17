@@ -4,6 +4,12 @@ One version number for the whole project: the TV app (APK), the Mac and iPhone a
 Home Assistant integration are released together. Every release on GitHub has the APK, the Mac
 app, the iPhone Xcode project, the integration zip and both blueprints attached.
 
+## v0.10.1
+
+- The **Mac app** is attached to the release (`music-light-synk-mac.zip`); v0.10.0 missed it.
+  Nothing else changed. Mac and iPhone guide:
+  [docs/SETUP-APPLE.md](https://github.com/Krishna9827/Music-Light-Synk/blob/main/docs/SETUP-APPLE.md).
+
 ## v0.10.0
 
 **Mac and iPhone apps** (a first, smaller version; the TV and Android apps are unchanged):

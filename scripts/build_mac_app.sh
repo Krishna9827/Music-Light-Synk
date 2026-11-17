@@ -2,12 +2,13 @@
 # Builds "Music Light Synk.app" (universal: Apple silicon + Intel) and zips it.
 # Usage: scripts/build_mac_app.sh <version> <build-number> <out.zip>
 # Runs on macOS (GitHub Actions). The app is ad-hoc signed, not notarised: first launch needs
-# right-click → Open, or System Settings → Privacy & Security → Open Anyway (see docs).
+# System Settings → Privacy & Security → Open Anyway (see docs/SETUP-APPLE.md).
 set -euo pipefail
 VERSION="${1:?version}"
 BUILD="${2:?build number}"
 OUT="${3:?output zip}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+case "$OUT" in /*) ;; *) OUT="$PWD/$OUT" ;; esac   # relative to where it was called from
 cd "$ROOT/apple"
 
 swift build -c release --arch arm64 --arch x86_64 --product MusicLightSynk
