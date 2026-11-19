@@ -22,8 +22,9 @@ hear its own audio (HDMI passthrough to a soundbar) can use **the phone's microp
 name in the app or in Home Assistant. And Home Assistant lights can **pulse to the beat** too.
 
 **Mac and iPhone** (new, a first smaller version): a menu-bar app for the Mac reads what Spotify,
-Apple Music and YouTube Music (in Safari / Chrome / Edge / Brave) play, and listens through the
-microphone for the beat. The iPhone app listens through the mic (also with the screen locked) and
+Apple Music and web players (YouTube Music, YouTube, Spotify, Apple Music in Safari / Chrome /
+Edge / Brave) play, can take the colours from the screen instead (an ambient strip behind the
+monitor), and gets the beat from the microphone or straight from the Mac's own sound. The iPhone app listens through the mic (also with the screen locked) and
 colours by Apple Music's album art. Both drive WLED and Home Assistant lights like the TV app and
 use the same integration. See [docs/SETUP-APPLE.md](docs/SETUP-APPLE.md).
 
@@ -557,8 +558,9 @@ The app already sends at most one update per track. The rest of the lag is Tuya'
   go out on a separate network thread, so a slow server never delays the lights.
 - `apple/`: a Swift package with the same engine for macOS 13+ and iOS 16+ (`MusicLightSynkCore`:
   colours, audio, Energy, WLED, link, control API, Home Assistant payloads, all on Foundation and
-  BSD sockets), the Mac menu-bar app (`MusicLightSynkMac`: now playing through AppleScript, the mic
-  through AVAudioEngine) and `ios/`, the iPhone app (XcodeGen project). Same settings keys, same
+  BSD sockets), the Mac menu-bar app (`MusicLightSynkMac`: now playing from the players'
+  system-wide announcements and AppleScript, the mic through AVAudioEngine, the screen and the
+  Mac's own sound through ScreenCaptureKit) and `ios/`, the iPhone app (XcodeGen project). Same settings keys, same
   link protocol and same HA schema as the Android app, so they mix freely.
 - Everything is plain Android framework code (no AndroidX, no libraries), minSdk 25 (Fire OS 6+),
   targetSdk 34. MQTT, WLED, colour extraction and payloads are framework-free Kotlin, so they

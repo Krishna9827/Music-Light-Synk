@@ -14,13 +14,19 @@ struct MenuView: View {
             Picker("Mode", selection: Binding(get: { model.mode }, set: { model.setMode($0) })) {
                 ForEach(DeviceMode.allCases, id: \.self) { Text($0.label).tag($0) }
             }
+            Picker("Colours from", selection: Binding(get: { model.colourSource }, set: { model.setColourSource($0) })) {
+                ForEach(ColourSources.all) { Text($0.label).tag($0.key) }
+            }
+            Picker("Listen to", selection: Binding(get: { model.audioSource }, set: { model.setAudioSource($0) })) {
+                ForEach(AudioSources.all) { Text($0.label).tag($0.key) }
+            }
             HStack {
                 Text(model.micState).font(.caption)
                 Spacer()
                 LevelBar(level: model.status.level).frame(width: 90, height: 6)
             }
             Text(model.status.lastResult).font(.caption).foregroundStyle(.secondary).lineLimit(3)
-            if let note = model.status.note ?? model.sourceNote {
+            if let note = model.notes {
                 Text(note).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
             }
             if !model.status.peers.isEmpty {
@@ -40,6 +46,28 @@ struct MenuView: View {
         .padding(14)
         .frame(width: 340)
     }
+}
+
+struct Choice: Identifiable {
+    let key: String
+    let label: String
+    var id: String { key }
+}
+
+enum ColourSources {
+    static let all = [
+        Choice(key: "artwork", label: "Album art"),
+        Choice(key: "auto", label: "Album art, else the screen"),
+        Choice(key: "screen", label: "The screen (always)"),
+    ]
+}
+
+enum AudioSources {
+    static let all = [
+        Choice(key: "mic", label: "Microphone"),
+        Choice(key: "output", label: "This Mac's sound"),
+        Choice(key: "off", label: "Off"),
+    ]
 }
 
 /// The colours laid out like a screen: corners, sides and the dominant colour in the middle.
@@ -89,6 +117,7 @@ struct SettingsView: View {
     @State private var spotify = true
     @State private var music = true
     @State private var browsers = true
+    @State private var screenInterval = 5.0
     @State private var link = true
     @State private var deviceName = ""
     @State private var room = ""
@@ -119,10 +148,17 @@ struct SettingsView: View {
                 Slider(value: $background, in: 0...100, step: 5) { Text("Background \(Int(background)) %") }
             }
             Section("What's playing") {
-                Toggle("Spotify", isOn: $spotify)
-                Toggle("Apple Music", isOn: $music)
-                Toggle("YouTube Music in Safari, Chrome, Edge or Brave", isOn: $browsers)
-                Text("YouTube Music needs \"Allow JavaScript from Apple Events\": Safari → Settings → Advanced → Show features for web developers, then Develop menu; Chrome → View → Developer.")
+                Toggle("Spotify app", isOn: $spotify)
+                Toggle("Apple Music app", isOn: $music)
+                Toggle("Web players in Safari, Chrome, Edge or Brave (YouTube Music, YouTube, Spotify, Apple Music)", isOn: $browsers)
+                Text("Web players need \"Allow JavaScript from Apple Events\": Safari → Settings → Advanced → Show features for web developers, then Develop menu; Chrome → View → Developer.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Screen colours") {
+                Slider(value: $screenInterval, in: 0...60, step: 1) {
+                    Text(screenInterval == 0 ? "Home Assistant lights: on track change only" : "Home Assistant lights: every \(Int(screenInterval)) s at most")
+                }
+                Text("With \"Colours from: the screen\" (menu), WLED follows the screen all the time. Slow bulbs in Home Assistant get the new colours at most this often. The first time, macOS asks to allow Screen & System Audio Recording (also used for \"Listen to: This Mac's sound\").")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Other devices") {
@@ -155,6 +191,7 @@ struct SettingsView: View {
         spotify = s.useSpotify
         music = s.useMusic
         browsers = s.useBrowsers
+        screenInterval = Double(s.screenIntervalSec)
         link = s.linkEnabled
         deviceName = s.deviceName
         room = s.room
@@ -175,6 +212,7 @@ struct SettingsView: View {
         s.useSpotify = spotify
         s.useMusic = music
         s.useBrowsers = browsers
+        s.screenIntervalSec = Int(screenInterval)
         s.linkEnabled = link
         s.deviceName = deviceName
         s.room = room

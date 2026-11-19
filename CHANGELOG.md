@@ -4,6 +4,27 @@ One version number for the whole project: the TV app (APK), the Mac and iPhone a
 Home Assistant integration are released together. Every release on GitHub has the APK, the Mac
 app, the iPhone Xcode project, the integration zip and both blueprints attached.
 
+## v0.11.0
+
+Mac app, from the first test:
+- **Spotify and Apple Music apps are seen again.** The app now also listens to the song
+  announcements both apps make (no permission needed, and instant on every play / pause / track
+  change), and asks them in a way that works on current macOS. Covers they don't hand over come
+  from Spotify's public link preview or Apple's iTunes search. If asking an app fails, the menu
+  says why instead of staying silent.
+- **Web players**: besides YouTube Music, also YouTube, and the Spotify and Apple Music web
+  players in Safari / Chrome / Edge / Brave. With several tabs, a playing one wins.
+- **Screen colours** (*Colours from* in the menu): *Album art*, *Album art, else the screen*, or
+  *The screen (always)*: the corners and sides of the screen drive the lights, music or not (an
+  ambient strip behind the monitor follows the picture). WLED follows every change; Home Assistant
+  bulbs at most every few seconds (*Settings → Screen colours*, or *Re-sample screen every* in
+  Home Assistant). Home Assistant's *Colour source mode* select and *Screen capture* switch work
+  for the Mac.
+- **Listen to: This Mac's sound**: the beat, Energy bars and Home Assistant's music effect can
+  follow exactly what the Mac plays instead of the microphone. Also in Home Assistant's *Audio
+  source*.
+- Screen colours and the Mac's sound need *Screen & System Audio Recording* (macOS asks once).
+
 ## v0.10.1
 
 - The **Mac app** is attached to the release (`music-light-synk-mac.zip`); v0.10.0 missed it.

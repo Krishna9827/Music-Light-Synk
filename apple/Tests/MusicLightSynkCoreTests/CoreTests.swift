@@ -168,4 +168,60 @@ final class SettingsAndControlTests: XCTestCase {
         XCTAssertEqual(ok.0, 200)
         XCTAssertEqual(ok.1["message"] as? String, "done configure 1")
     }
+
+    func testColourAndAudioSourceKeys() {
+        let s = freshSettings()
+        XCTAssertEqual(s.sourceMode, "artwork")
+        XCTAssertEqual(s.audioSource, "mic")
+        let msg = s.configure(["source": "auto", "screen_interval": 500, "audio_source": "output"])
+        XCTAssertFalse(msg.contains("not available"), msg)
+        XCTAssertEqual(s.sourceMode, "auto")
+        XCTAssertEqual(s.screenIntervalSec, 120)
+        XCTAssertEqual(s.audioSource, "output")
+        XCTAssertTrue(s.configure(["source": "nonsense"]).contains("not available here: source"))
+        XCTAssertEqual(s.sourceMode, "auto")
+        XCTAssertEqual(s.snapshot()["source"] as? String, "auto")
+
+        let mac = Engine(settings: s, platform: "mac", appVersion: "test", defaultName: "Mac")
+        XCTAssertTrue(mac.outputWanted)
+        XCTAssertFalse(mac.micWanted)
+        XCTAssertTrue(mac.screenWanted)
+        XCTAssertEqual((mac.statusJson()["audio_sources"] as? [[String: String]])?.map { $0["key"] ?? "" }, ["mic", "output", "off"])
+        // An iPhone has no "Mac's sound": it keeps listening through the microphone.
+        let phone = Engine(settings: s, platform: "ios", appVersion: "test", defaultName: "iPhone")
+        XCTAssertFalse(phone.outputWanted)
+        XCTAssertTrue(phone.micWanted)
+        XCTAssertFalse(phone.screenWanted)
+    }
+
+    func testAnalyzerTurnsAnyBlockSizeIntoLevels() {
+        var calls = 0
+        let a = AudioAnalyzer { _, _ in calls += 1 }
+        let samples = (0..<3000).map { Float(0.5 * sin(2 * .pi * 90 * Double($0) / 48000)) }
+        samples.withUnsafeBufferPointer { all in
+            a.feed(UnsafeBufferPointer(rebasing: all[0..<700]), rate: 48000)
+            a.feed(UnsafeBufferPointer(rebasing: all[700..<3000]), rate: 48000)
+        }
+        XCTAssertEqual(calls, 2) // 3000 samples: two blocks of 1024, the rest waits
+    }
+
+    func testScreenModeDrivesWledWithoutMusic() throws {
+        let rx = try XCTUnwrap(UdpSocket(bindPort: 0, receiveTimeoutMs: 3000))
+        let s = freshSettings()
+        _ = s.configure(["source": "screen", "screen_interval": 0, "mode": "lights", "link_enabled": false, "wled_restore": false,
+                         "wled_devices": "127.0.0.1=ambient:4,2,4,2:bottom_left:cw"])
+        s.controlEnabled = false
+        let e = Engine(settings: s, platform: "mac", appVersion: "test", defaultName: "Test Mac", wledPort: rx.localPort)
+        XCTAssertTrue(e.screenWanted)
+        e.start()
+        e.nowPlaying(nil) // nothing plays: the screen still drives the lights
+        e.screen(ColorExtractor.testPalette(s.extractOptions))
+        let got = try XCTUnwrap(rx.receive())
+        XCTAssertEqual(got.bytes.first, 4) // DNRGB realtime
+        let deadline = Date().addingTimeInterval(3)
+        while !e.status.lastResult.contains("Sent screen colours") && Date() < deadline { usleep(20_000) }
+        XCTAssertTrue(e.status.lastResult.contains("Sent screen colours"), e.status.lastResult)
+        XCTAssertEqual(e.status.source, "screen")
+        XCTAssertEqual(e.statusJson()["source_mode"] as? String, "screen")
+    }
 }

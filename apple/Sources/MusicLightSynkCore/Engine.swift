@@ -74,6 +74,12 @@ public final class Engine {
     private var lastPalAt: Int64 = 0
     private var lastStatusJson = ""
     private var lastStatusAt: Int64 = 0
+    private var lastHaSent: Palette?
+    private var lastHaAt: Int64 = 0
+    private var screenPal: (palette: Palette, at: Int64)?
+    private var screenRunning = false
+    /// The playing track gave no cover (auto mode then follows the screen).
+    private var noArtTrack: String?
 
     public init(settings: AppSettings = AppSettings(), platform: String, appVersion: String, defaultName: String, wledPort: UInt16 = WledPackets.udpPort) {
         self.settings = settings
@@ -87,7 +93,15 @@ public final class Engine {
     public var status: Status { shared.locked { _status } }
 
     /// The microphone should run (the mode lends it or listens with it).
-    public var micWanted: Bool { settings.mode.micOn && settings.audioSource != "off" }
+    public var micWanted: Bool {
+        settings.mode.micOn && (settings.audioSource == "mic" || (settings.audioSource == "output" && platform != "mac"))
+    }
+
+    /// The Mac's own sound should be captured instead of the microphone.
+    public var outputWanted: Bool { platform == "mac" && settings.mode.micOn && settings.audioSource == "output" }
+
+    /// The screen should be sampled (Mac): colours from the screen, all the time or as the fallback.
+    public var screenWanted: Bool { platform == "mac" && settings.mode.lights && settings.sourceMode != "artwork" }
 
     public var deviceName: String { settings.deviceName.isEmpty ? defaultName : settings.deviceName }
 
@@ -109,13 +123,37 @@ public final class Engine {
 
     public func nowPlaying(_ np: NowPlaying?) { q.async { self.handleNowPlaying(np) } }
 
+    /// A new screen picture's colours (Mac; any thread). Only complete, changed frames come here.
+    public func screen(_ palette: Palette) { q.async { self.handleScreen(palette) } }
+
+    /// The Mac's screen capture started or stopped (any thread).
+    public func screenCapture(running: Bool) {
+        q.async { [self] in
+            screenRunning = running
+            if !running {
+                screenPal = nil
+                if sessionActive && lastSource == "screen" && settings.sourceMode == "screen" { endSession("Screen capture stopped") }
+            }
+        }
+    }
+
     public func settingsChanged() {
         q.async { [self] in
             artKey = nil
             ensureServices()
             hubShown = nil
             if settings.mode.lights {
-                if let np = current, np.playing { process(np, trackChanged: true, force: true) }
+                let screenMode = settings.sourceMode == "screen"
+                if !screenMode && sessionActive && lastSource == "screen" && current?.playing != true {
+                    endSession("Screen colours off")
+                }
+                if screenMode {
+                    stopItem?.cancel()
+                    stopItem = nil
+                    if let sp = screenPal { sendPalette(current, sp.palette, source: "screen", reason: "screen", force: true) }
+                } else if let np = current, np.playing {
+                    process(np, trackChanged: true, force: true)
+                }
             } else {
                 endSession("Lights off") // "Microphone only" / "Off": give every light back now
             }
@@ -164,6 +202,11 @@ public final class Engine {
         current = np
         update { $0.nowPlaying = np?.describe() ?? "Nothing playing" }
         guard settings.mode.lights else { return }
+        if settings.sourceMode == "screen" {
+            // The screen drives the lights whether or not music plays.
+            currentKey = np?.trackKey
+            return
+        }
         guard let np, np.playing else {
             if sessionActive && stopItem == nil {
                 let item = DispatchWorkItem { [weak self] in self?.endSession("Playback stopped") }
@@ -180,11 +223,38 @@ public final class Engine {
     }
 
     private func process(_ np: NowPlaying, trackChanged: Bool, force: Bool) {
-        guard let palette = artworkPalette(np) else {
-            update { $0.lastResult = Engine.stamp("No colours: \(np.app) gave no album art") }
+        let reason = trackChanged ? "track" : "update"
+        if settings.sourceMode != "screen", let palette = artworkPalette(np) {
+            noArtTrack = nil
+            sendPalette(np, palette, source: "artwork", reason: reason, force: force)
             return
         }
-        sendPalette(np, palette, reason: trackChanged ? "track" : "update", force: force)
+        noArtTrack = np.trackKey
+        if settings.sourceMode == "auto" {
+            if let sp = screenPal {
+                sendPalette(np, sp.palette, source: "screen", reason: reason, force: force)
+            } else {
+                update { $0.lastResult = Engine.stamp("No colours: \(np.app) gave no album art, and the screen gave no picture yet") }
+            }
+            return
+        }
+        update { $0.lastResult = Engine.stamp("No colours: \(np.app) gave no album art") }
+    }
+
+    /// Screen frames: in "screen" mode they drive the lights all the time; in "auto" mode while
+    /// the playing app gives no cover. WLED follows every change; Home Assistant gets new colours
+    /// at most every screen_interval seconds (0: only when the track changes).
+    private func handleScreen(_ palette: Palette) {
+        let now = monotonicMs()
+        if palette.isBlank { return }
+        screenPal = (palette, now)
+        guard settings.mode.lights else { return }
+        let mode = settings.sourceMode
+        let follow = mode == "screen" || (mode == "auto" && current?.playing == true && noArtTrack != nil && noArtTrack == current?.trackKey)
+        guard follow else { return }
+        let iv = Int64(settings.screenIntervalSec) * 1000
+        let haDue = !sessionActive || (iv > 0 && now - lastHaAt >= iv)
+        sendPalette(current, palette, source: "screen", reason: sessionActive ? "screen_poll" : "screen", force: false, haAllowed: haDue)
     }
 
     private func artworkPalette(_ np: NowPlaying) -> Palette? {
@@ -198,29 +268,40 @@ public final class Engine {
         return p
     }
 
-    private func sendPalette(_ np: NowPlaying, _ palette: Palette, reason: String, force: Bool) {
-        lastSource = "artwork"
+    private func sendPalette(_ np: NowPlaying?, _ palette: Palette, source: String, reason: String, force: Bool, haAllowed: Bool = true) {
+        lastSource = source
         lastPalette = palette
         guard settings.hasOutput else {
-            update { $0.palette = palette; $0.source = "artwork"; $0.lastResult = Engine.stamp("Not sent: set up WLED or Home Assistant first") }
+            update { $0.palette = palette; $0.source = source; $0.lastResult = Engine.stamp("Not sent: set up WLED or Home Assistant first") }
             return
         }
         let start = !sessionActive
         if start { playingSince = monotonicMs() }
-        if !force && !start && palette.maxDistance(to: lastSent) < Engine.changeThreshold {
-            update { $0.palette = palette; $0.source = "artwork" }
+        // Lights already showing these colours get nothing (slow bulbs stay calm).
+        let newColours = force || start || palette.maxDistance(to: lastSent) >= Engine.changeThreshold
+        let haNow = settings.isHaConfigured && (force || start || (haAllowed && palette.maxDistance(to: lastHaSent) >= Engine.changeThreshold))
+        if !newColours && !haNow {
+            update { $0.palette = palette; $0.source = source }
             return
         }
-        lastSent = palette
         sessionActive = true
         var parts: [String] = []
-        if settings.isWledConfigured { parts.append(driveWled(LightHub.prioPlaying, palette, sessionStart: start)) }
-        if settings.isHaConfigured {
-            postHa(withStatus(Payloads.colors(event: "colors", reason: reason, sessionStart: start, source: "artwork", np: np, palette: palette, device: deviceName)))
+        if newColours {
+            lastSent = palette
+            if settings.isWledConfigured { parts.append(driveWled(LightHub.prioPlaying, palette, sessionStart: start)) }
+            sendPal(palette, playing: true, title: np?.describe())
+        }
+        if haNow {
+            lastHaSent = palette
+            lastHaAt = monotonicMs()
+            postHa(withStatus(Payloads.colors(event: "colors", reason: reason, sessionStart: start, source: source, np: np, palette: palette, device: deviceName)))
             parts.append("HA sending")
         }
-        sendPal(palette, playing: true, title: np.describe())
-        update { $0.lastResult = Engine.stamp("Sent artwork colours -> " + parts.joined(separator: " | ")); $0.palette = palette; $0.source = "artwork" }
+        update {
+            if !parts.isEmpty { $0.lastResult = Engine.stamp("Sent \(source) colours -> " + parts.joined(separator: " | ")) }
+            $0.palette = palette
+            $0.source = source
+        }
     }
 
     private func endSession(_ label: String) {
@@ -233,6 +314,8 @@ public final class Engine {
         if settings.isHaConfigured { postHa(withStatus(Payloads.stopped(current, device: deviceName))); parts.append("HA sending") }
         if let p = lastSent { sendPal(p, playing: false, title: nil) }
         lastSent = nil
+        lastHaSent = nil
+        lastHaAt = 0
         currentKey = nil
         update { $0.lastResult = Engine.stamp("\(label) -> " + parts.joined(separator: " | ")) }
         reevaluateWled()
@@ -305,12 +388,17 @@ public final class Engine {
              "mirror": d.effect.mirror, "spec": "\(d.host)=\(WledDevices.formatDevice(d))"]
         }
         let what = platform == "ios" ? "iPhone" : "Mac"
+        var sources = [["key": "mic", "label": "This \(what)'s microphone"]]
+        if platform == "mac" { sources.append(["key": "output", "label": "This Mac's sound (what it plays)"]) }
+        sources.append(["key": "off", "label": "Off"])
+        let heard: Any = st.hearing ? (outputWanted ? "output" : "mic") : NSNull()
         return [
             "app_version": appVersion, "platform": platform, "media_access": true, "media_connected": true,
-            "screen_capture": false, "source_mode": "artwork", "last_source": lastSource as Any? ?? NSNull(),
+            "screen_capture": screenRunning, "source_mode": platform == "mac" ? settings.sourceMode : "artwork",
+            "last_source": lastSource as Any? ?? NSNull(),
             "enabled": settings.mode.lights, "mode": settings.mode.rawValue, "modes": DeviceMode.allCases.map { $0.rawValue },
-            "wled": wledList, "audio": st.hearing ? "mic" : NSNull(), "audio_peer": NSNull(),
-            "audio_sources": [["key": "mic", "label": "This \(what)'s microphone"], ["key": "off", "label": "Off"]],
+            "wled": wledList, "audio": heard, "audio_peer": NSNull(),
+            "audio_sources": sources,
             "listening": settings.mode.micOn, "link_peers": st.peers, "wled_renderer": st.renderer as Any? ?? NSNull(),
             "settings": settings.snapshot(),
         ]
@@ -374,6 +462,16 @@ public final class Engine {
         case "status":
             q.async { self.sendStatus(force: true) }
             return "Status sent"
+        case "capture" where platform == "mac":
+            if settings.sourceMode == "artwork" { settings.sourceMode = "auto" }
+            settingsChanged()
+            DispatchQueue.main.async { self.onChange?() }
+            return "Screen colours on (\(settings.sourceMode))"
+        case "stop_capture" where platform == "mac":
+            settings.sourceMode = "artwork"
+            settingsChanged()
+            DispatchQueue.main.async { self.onChange?() }
+            return "Screen colours off"
         default:
             return "Screen capture isn't available on this device"
         }

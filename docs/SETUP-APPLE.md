@@ -6,15 +6,16 @@ integration.
 
 | | Mac | iPhone |
 |---|---|---|
-| Album-art colours | Spotify, Apple Music, YouTube Music in Safari / Chrome / Edge / Brave | Apple Music only (iOS doesn't let apps see what Spotify or YouTube Music play) |
-| Lights to the beat (microphone) | yes | yes, also with the screen locked |
+| Album-art colours | Spotify and Apple Music apps; YouTube Music, YouTube, Spotify and Apple Music in Safari / Chrome / Edge / Brave | Apple Music only (iOS doesn't let apps see what Spotify or YouTube Music play) |
+| Screen colours (corners and sides of the screen, like a TV backlight) | yes: always, or when there's no album art | no |
+| Lights to the beat | the microphone or **the Mac's own sound** | the microphone, also with the screen locked |
 | WLED: parts, ambient gradient, Energy / Flip / Mirror | yes | yes |
 | Home Assistant lights: colours, Beat pulse, Energy, Energy bars | yes | yes |
 | Controlled from Home Assistant (Mode, WLED strips, ...) | yes, over Wi-Fi | yes, while the app runs |
 | Lend its microphone to the TV | yes (device link) | not yet |
 
-Not yet: the Mac's own sound output as audio source (it listens through the microphone), and
-the device link on iPhone (Apple only allows the broadcasts it needs to apps it has approved).
+Not yet: the device link on iPhone (Apple only allows the broadcasts it needs to apps it has
+approved).
 
 ---
 
@@ -50,25 +51,49 @@ macOS asks once for each:
 
 - **Microphone**: say **Allow** (Mode *Lights + microphone* or *Microphone only*). Turned it down?
   *System Settings → Privacy & Security → Microphone → Music Light Synk*.
-- **"Music Light Synk wants to control Spotify / Music / Safari"**: say **OK**. That's how it reads
-  what's playing. Turned it down? *System Settings → Privacy & Security → Automation*.
+- **"Music Light Synk wants to control Spotify / Music / Safari"**: say **OK**. That's how it gets
+  the album art and the browser's music. Turned it down? *System Settings → Privacy & Security →
+  Automation*. (Spotify and Apple Music also tell the app about every song change on their own, so
+  the song shows up even without this; the cover is then looked up online.)
 - **Local network**: say **Allow** (to reach WLED and Home Assistant).
+- **Screen & System Audio Recording**: only if you pick *Colours from: the screen* or *Listen to:
+  This Mac's sound* (step 5). macOS asks once; allow it, then **quit and reopen** the app (menu →
+  Quit). macOS may ask again now and then whether to keep allowing it.
 
-### 4. YouTube Music in the browser
+### 4. Music in the browser
 
-The app reads YouTube Music from the browser tab, which needs one switch in the browser:
+The app reads YouTube Music, YouTube, and the Spotify and Apple Music web players from the browser
+tab, which needs one switch in the browser:
 
 - **Safari**: *Settings → Advanced → Show features for web developers*, then menu **Develop → Allow
   JavaScript from Apple Events**.
 - **Chrome / Edge / Brave**: menu **View → Developer → Allow JavaScript from Apple Events**.
 
-Keep YouTube Music in a normal tab at `music.youtube.com`.
+Keep the player in a normal tab (`music.youtube.com`, `youtube.com/watch…`, `open.spotify.com`,
+`music.apple.com`). When several play, the app sticks with the one it picked first.
 
 ### 5. Use it
 
-The menu-bar panel shows what's playing, the colours, **Mode**, the microphone level and the last
-result.
+The menu-bar panel shows what's playing, the colours, **Mode**, **Colours from**, **Listen to**,
+the sound level and the last result.
 
+**Colours from**
+- **Album art** (default): the cover of what's playing, once per song.
+- **Album art, else the screen**: the cover; when the song or video that plays has none, the
+  screen's corners and sides. For films, games or anything else the app doesn't see playing,
+  use *The screen (always)*.
+- **The screen (always)**: the lights follow the screen, music or not. Great behind a monitor:
+  set the WLED strip around it to *ambient* and each part of the strip takes the colour of that
+  part of the screen. WLED follows every change; slow Home Assistant bulbs get the new colours at
+  most every few seconds (*Settings → Screen colours*). The app's own windows are left out.
+
+**Listen to** (for the beat, Energy bars and Home Assistant's music effect)
+- **Microphone**: hears whatever plays in the room.
+- **This Mac's sound**: exactly what the Mac plays, nothing from the room; the best choice when
+  the music comes from the Mac itself.
+- **Off**.
+
+**Mode**
 - **Lights + microphone**: the Mac's lights follow the album art and bounce to the beat. When
   something else plays (your iPhone on the 2.1 speakers), the mic still drives them, in the last
   album's colours.
@@ -123,8 +148,9 @@ beat in the last colours.
 
 | You see | Fix |
 |---|---|
-| Mac: "Allow JavaScript from Apple Events" note | Step 4 above, in the browser that plays YouTube Music |
-| Mac: nothing playing, but Spotify plays | *System Settings → Privacy & Security → Automation → Music Light Synk → Spotify* on |
+| Mac: "Allow JavaScript from Apple Events" note | Step 4 above, in the browser that plays the music |
+| Mac: nothing playing, but Spotify / Apple Music plays | Press pause and play once (the app hears about the song then). The orange note says what's wrong with asking the app; usually *System Settings → Privacy & Security → Automation → Music Light Synk → Spotify / Music* on |
+| Mac: "Screen & System Audio Recording" note, or the screen / Mac's sound does nothing | Allow it in *System Settings → Privacy & Security → Screen & System Audio Recording*, then quit and reopen the app |
 | Mac: "Microphone not allowed" | *System Settings → Privacy & Security → Microphone → Music Light Synk* on |
 | Mac: the TV doesn't list the Mac's microphone | Mode includes the microphone; Mac and TV on the same Wi-Fi with **Device link** on |
 | Mac: asks for Microphone / Automation again after an update | Normal for an app outside the App Store: allow again (or switch the old entry off and on in Privacy & Security) |

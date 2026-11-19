@@ -58,11 +58,23 @@ public final class AppSettings {
         get { ["off", "beat", "level"].contains(str("ha_music")) ? str("ha_music") : "off" }
         set { d.set(["off", "beat", "level"].contains(newValue) ? newValue : "off", forKey: "ha_music") }
     }
-    /// "mic" or "off" (a Mac / iPhone listens through its microphone).
+    /// "mic", "output" (the Mac's own sound, what it plays) or "off".
     public var audioSource: String {
-        get { str("audio_source", "mic") == "off" ? "off" : "mic" }
-        set { d.set(newValue == "off" ? "off" : "mic", forKey: "audio_source") }
+        get { AppSettings.audioSources.contains(str("audio_source")) ? str("audio_source") : "mic" }
+        set { d.set(AppSettings.audioSources.contains(newValue) ? newValue : "mic", forKey: "audio_source") }
     }
+    static let audioSources = ["mic", "output", "off"]
+
+    /// Where the colours come from: "artwork" (album art), "screen" (the Mac's screen, all the
+    /// time) or "auto" (album art; the screen when the playing app gives no cover). Android's keys.
+    public var sourceMode: String {
+        get { AppSettings.sourceModes.contains(str("source")) ? str("source") : "artwork" }
+        set { d.set(AppSettings.sourceModes.contains(newValue) ? newValue : "artwork", forKey: "source") }
+    }
+    public static let sourceModes = ["artwork", "auto", "screen"]
+    /// Screen colours: Home Assistant lights get them at most this often (0 = only when the track
+    /// changes). WLED follows the screen all the time.
+    public var screenIntervalSec: Int { get { int("screen_interval", 5, 0...120) } set { d.set(newValue, forKey: "screen_interval") } }
 
     // Colours
     public var cornerPct: Int { get { int("corner_pct", 25, 10...50) } set { d.set(newValue, forKey: "corner_pct") } }
@@ -151,7 +163,9 @@ public final class AppSettings {
             case "mode": if let s = v as? String, let m = DeviceMode(rawValue: s) { mode = m } else { ok = false }
             case "ha_music": if let s = v as? String { haMusic = s } else { ok = false }
             case "ha_beats": if let b = asBool(v) { haMusic = b ? "beat" : "off" } else { ok = false }
-            case "audio_source": if let s = v as? String { audioSource = s } else { ok = false }
+            case "audio_source": if let s = v as? String, AppSettings.audioSources.contains(s) { audioSource = s } else { ok = false }
+            case "source": if let s = v as? String, AppSettings.sourceModes.contains(s) { sourceMode = s } else { ok = false }
+            case "screen_interval": if let n = asInt(v) { screenIntervalSec = n } else { ok = false }
             case "enabled": if let b = asBool(v) { mode = b ? (mode.micOn ? .lightsMic : .lights) : (mode.micOn ? .mic : .off) } else { ok = false }
             case "wled_enabled": if let b = asBool(v) { wledEnabled = b } else { ok = false }
             case "wled_devices": if let s = v as? String { wledDevicesRaw = s } else { ok = false }
@@ -185,7 +199,7 @@ public final class AppSettings {
             "pulse_strength": pulseStrengthPct, "audio_source": audioSource, "energy_sensitivity": energySensitivityPct,
             "energy_blur": energyBlur, "energy_bg": energyBackgroundPct, "link_enabled": linkEnabled,
             "device_name": deviceName, "room": room, "mode": mode.rawValue, "ha_music": haMusic,
-            "ha_beats": haMusic != "off",
+            "ha_beats": haMusic != "off", "source": sourceMode, "screen_interval": screenIntervalSec,
         ]
     }
 }
