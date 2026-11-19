@@ -32,6 +32,10 @@ approved).
 3. A small **waveform icon** appears in the menu bar (top right). That's the app. There's no
    window in the Dock.
 
+**Updating:** quit the running one first (waveform icon → **Quit**), *then* replace it in
+Applications and open the new one. The app has no Dock icon, so it's easy to miss that the old one
+still runs; opening a new copy over a running one fails with *"can't be opened. -47"*.
+
 ### 2. Set it up
 
 Click the menu-bar icon → **Settings…**
@@ -153,6 +157,7 @@ beat in the last colours.
 | Mac: "Screen & System Audio Recording" note, or the screen / Mac's sound does nothing | Allow it in *System Settings → Privacy & Security → Screen & System Audio Recording*, then quit and reopen the app |
 | Mac: "Microphone not allowed" | *System Settings → Privacy & Security → Microphone → Music Light Synk* on |
 | Mac: the TV doesn't list the Mac's microphone | Mode includes the microphone; Mac and TV on the same Wi-Fi with **Device link** on |
+| Mac: *"Music Light Synk.app" can't be opened. -47* | The old copy is still running. Quit it (waveform icon → Quit, or in Terminal `killall "Music Light Synk"`), then open the app again. Still there? Delete it from Applications, unzip a fresh copy, drag it in, and run `xattr -dr com.apple.quarantine "/Applications/Music Light Synk.app"` |
 | Mac: asks for Microphone / Automation again after an update | Normal for an app outside the App Store: allow again (or switch the old entry off and on in Privacy & Security) |
 | iPhone app stopped after a week | Connect it and press Run in Xcode again (free Apple ID limit) |
 | Home Assistant controls unavailable for the Mac / iPhone | HA URL and webhook ID set in the app; the iPhone app has to be running |
