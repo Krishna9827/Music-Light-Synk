@@ -72,6 +72,13 @@ final class WledTests: XCTestCase {
         XCTAssertEqual(WledDevices.parse("no-equals; 1.2.3.4=sideways; 1.2.3.5=ambient:1,2,3; 1.2.3.7=top").errors.count, 3)
     }
 
+    func testAmbientIsForgivingAboutSpacesAndCorners() {
+        let p = WledDevices.parse("10.0.0.61=ambient:30, 18, 30, 18:bottom left:anticlockwise:energy\n10.0.0.62=ambient:10,5,10,5:TR")
+        XCTAssertTrue(p.errors.isEmpty, p.errors.joined())
+        XCTAssertEqual(WledDevices.formatDevice(p.devices[0]), "ambient:30,18,30,18:bottom_left:ccw:energy")
+        XCTAssertEqual(WledDevices.formatDevice(p.devices[1]), "ambient:10,5,10,5:top_right:cw")
+    }
+
     func testEnergyDirectionsMatchLedFx() {
         XCTAssertLessThan(EnergyEffect.axis(0, 10, flip: false, mirror: false), 0.1)
         XCTAssertLessThan(EnergyEffect.axis(9, 10, flip: true, mirror: false), 0.1)

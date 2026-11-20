@@ -44,8 +44,11 @@ Click the menu-bar icon → **Settings…**
    `music_light_synk_mac`. In Home Assistant, **Add integration → Music Light Synk** with that same
    webhook ID, pick the lights near the Mac, and leave the Fire TV step empty. The Mac's device page
    then gets the same controls as the TV (over Wi-Fi).
-2. **WLED devices**: one per line, the same format as on the TV, e.g.
-   `192.168.1.64=dominant:energy` or `192.168.1.60=ambient:40,22,40,22:bottom_left:cw:energy:flip:mirror`.
+2. **WLED devices**: **Add WLED**, type its IP and pick what it shows: a corner or side of the
+   picture, dominant / vibrant / average, WLED's own effect in album colours, or **Ambient
+   gradient** for a strip around the TV or monitor. For ambient, enter the LEDs on each side
+   (0 for a side without LEDs), the corner where LED 1 is (where the data wire enters, seen from
+   the front) and the direction. Energy / Flip / Mirror make it bounce to the music.
    Or add them from Home Assistant (*Configure → WLED strips*) once step 1 is done.
 3. **Save**.
 

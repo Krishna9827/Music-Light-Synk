@@ -111,13 +111,17 @@ struct ContentView: View {
         s.webhookId = webhook
         s.haMusic = haMusic
         let parsed = WledDevices.parse(wled)
-        s.wledDevicesRaw = wled
+        if parsed.errors.isEmpty { s.wledDevicesRaw = wled } // never drop a line the user typed
         s.wledBrightnessPct = Int(brightness)
         s.energySensitivityPct = Int(sensitivity)
         s.energyBlur = Int(blur)
         s.energyBackgroundPct = Int(background)
         model.settingsSaved()
-        message = parsed.errors.isEmpty ? "Saved" : "Saved, but ignored: " + parsed.errors.joined(separator: "; ")
-        load()
+        if parsed.errors.isEmpty {
+            message = "Saved"
+            load()
+        } else {
+            message = "Saved, except the WLED list (fix it, then Save again): " + parsed.errors.joined(separator: "; ")
+        }
     }
 }

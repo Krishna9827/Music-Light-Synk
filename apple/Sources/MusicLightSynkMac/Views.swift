@@ -109,7 +109,7 @@ struct SettingsView: View {
     @State private var webhook = ""
     @State private var haMusic = "off"
     @State private var control = true
-    @State private var wled = ""
+    @State private var wleds: [EditableWled] = []
     @State private var brightness = 100.0
     @State private var sensitivity = 100.0
     @State private var blur = 2.0
@@ -137,9 +137,10 @@ struct SettingsView: View {
                 if let url = model.status.controlURL { Text("Control address: \(url)").font(.caption).foregroundStyle(.secondary) }
             }
             Section("WLED devices (driven by this Mac)") {
-                TextEditor(text: $wled).font(.system(.body, design: .monospaced)).frame(height: 70)
-                Text("One per line or separated by \";\": IP=part[:options], e.g. 192.168.1.60=dominant:energy or 192.168.1.61=ambient:40,22,40,22:bottom_left:cw:energy:flip:mirror. Parts: top_left … bottom_right, dominant, vibrant, average, palette, ambient.")
-                    .font(.caption).foregroundStyle(.secondary)
+                ForEach(wleds) { d in
+                    WledRow(device: binding(d.id)) { wleds.removeAll { $0.id == d.id } }
+                }
+                Button("Add WLED") { wleds.append(EditableWled()) }
                 Slider(value: $brightness, in: 10...100, step: 5) { Text("Brightness \(Int(brightness)) %") }
             }
             Section("Energy (bars to the beat)") {
@@ -183,7 +184,7 @@ struct SettingsView: View {
         webhook = s.webhookId
         haMusic = s.haMusic
         control = s.controlEnabled
-        wled = s.wledDevicesRaw.replacingOccurrences(of: "; ", with: "\n")
+        wleds = s.wledDevices.map(EditableWled.init)
         brightness = Double(s.wledBrightnessPct)
         sensitivity = Double(s.energySensitivityPct)
         blur = Double(s.energyBlur)
@@ -203,8 +204,13 @@ struct SettingsView: View {
         s.webhookId = webhook
         s.haMusic = haMusic
         s.controlEnabled = control
-        let parsed = WledDevices.parse(wled)
-        s.wledDevicesRaw = wled
+        var list: [WledDevice] = []
+        var errors: [String] = []
+        for w in wleds {
+            if w.host.trimmingCharacters(in: .whitespaces).isEmpty { continue } // an empty new row
+            if let d = w.device { list.append(d) } else { errors.append("\(w.host): each side 0–4000 LEDs, at least 1 in total") }
+        }
+        if errors.isEmpty { s.wledDevicesRaw = WledDevices.format(list) }
         s.wledBrightnessPct = Int(brightness)
         s.energySensitivityPct = Int(sensitivity)
         s.energyBlur = Int(blur)
@@ -217,7 +223,129 @@ struct SettingsView: View {
         s.deviceName = deviceName
         s.room = room
         model.settingsSaved()
-        message = parsed.errors.isEmpty ? "Saved" : "Saved, but ignored: " + parsed.errors.joined(separator: "; ")
-        load()
+        if errors.isEmpty {
+            message = "Saved"
+            load()
+        } else {
+            message = "WLED list not saved: " + errors.joined(separator: "; ")
+        }
+    }
+
+    private func binding(_ id: UUID) -> Binding<EditableWled> {
+        Binding(get: { wleds.first { $0.id == id } ?? EditableWled() },
+                set: { v in if let i = wleds.firstIndex(where: { $0.id == id }) { wleds[i] = v } })
+    }
+}
+
+/// One WLED in the settings, as fields (no text format to get wrong). Options this editor
+/// doesn't show (a palette's colours / effect, "keep", leds=) are kept from the saved device.
+struct EditableWled: Identifiable {
+    let id = UUID()
+    var host = ""
+    var part = "dominant"
+    var top = 40, right = 22, bottom = 40, left = 22
+    var start = Corner.bottomLeft
+    var clockwise = true
+    var energy = false, flip = false, mirror = false
+    var base: WledDevice?
+
+    init() {}
+
+    init(_ d: WledDevice) {
+        host = d.host
+        base = d
+        energy = d.effect.energy
+        flip = d.effect.flip
+        mirror = d.effect.mirror
+        switch d.zone {
+        case let .section(slot, _): part = slot.key
+        case .palette: part = "palette"
+        case let .ambient(l):
+            part = "ambient"
+            top = l.top
+            right = l.right
+            bottom = l.bottom
+            left = l.left
+            start = l.start
+            clockwise = l.clockwise
+        }
+    }
+
+    static let parts: [Choice] = Slot.allCases.map { Choice(key: $0.key, label: $0.label) } + [
+        Choice(key: "palette", label: "WLED's own effect, album colours"),
+        Choice(key: "ambient", label: "Ambient gradient (strip around the TV / monitor)"),
+    ]
+
+    /// nil when the LED counts make no strip.
+    var device: WledDevice? {
+        let h = host.trimmingCharacters(in: .whitespaces)
+        let zone: WledZone
+        switch part {
+        case "ambient":
+            guard let l = WledLayout.parse("\(top),\(right),\(bottom),\(left)", start: start, clockwise: clockwise) else { return nil }
+            zone = .ambient(l)
+        case "palette":
+            if let b = base, case .palette = b.zone { zone = b.zone } else { zone = .palette(slots: WledZone.defaultSlots, fx: -1, pal: -1) }
+        default:
+            var keep = false
+            if let b = base, case let .section(_, k) = b.zone { keep = k }
+            zone = .section(Slot.of(part) ?? .dominant, keepEffect: keep)
+        }
+        return WledDevice(host: h, zone: zone, effect: WledEffect(energy: energy, flip: flip, mirror: mirror), leds: base?.leds ?? 0)
+    }
+}
+
+struct WledRow: View {
+    @Binding var device: EditableWled
+    let onRemove: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                TextField("WLED IP", text: $device.host, prompt: Text("192.168.1.60")).frame(width: 130)
+                Picker("Shows", selection: $device.part) {
+                    ForEach(EditableWled.parts) { Text($0.label).tag($0.key) }
+                }
+                .labelsHidden()
+                Button(action: onRemove) { Image(systemName: "trash") }.buttonStyle(.borderless).help("Remove this WLED")
+            }
+            if device.part == "ambient" {
+                HStack(spacing: 6) {
+                    Text("LEDs:").font(.caption)
+                    count("top", $device.top)
+                    count("right", $device.right)
+                    count("bottom", $device.bottom)
+                    count("left", $device.left)
+                }
+                HStack {
+                    Picker("LED 1 at", selection: $device.start) {
+                        ForEach(Corner.allCases, id: \.self) { Text($0.rawValue.replacingOccurrences(of: "_", with: " ")).tag($0) }
+                    }
+                    Picker("then", selection: $device.clockwise) {
+                        Text("clockwise").tag(true)
+                        Text("anticlockwise").tag(false)
+                    }
+                }
+                .font(.caption)
+                Text("Seen from the front. LED 1 is where the data wire enters; a side without LEDs gets 0.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            if device.part != "palette" {
+                HStack {
+                    Toggle("Energy", isOn: $device.energy)
+                    Toggle("Flip", isOn: $device.flip)
+                    Toggle("Mirror", isOn: $device.mirror)
+                }
+                .font(.caption)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func count(_ label: String, _ value: Binding<Int>) -> some View {
+        HStack(spacing: 2) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+            TextField(label, value: value, format: .number).frame(width: 46).labelsHidden()
+        }
     }
 }

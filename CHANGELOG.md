@@ -4,6 +4,16 @@ One version number for the whole project: the TV app (APK), the Mac and iPhone a
 Home Assistant integration are released together. Every release on GitHub has the APK, the Mac
 app, the iPhone Xcode project, the integration zip and both blueprints attached.
 
+## v0.11.1
+
+- **Mac: WLED strips are edited as fields**, no text format any more: IP, what it shows, and for
+  an ambient gradient the LED count per side, the corner where LED 1 is and the direction, plus
+  Energy / Flip / Mirror. Changing the ambient layout used to drop the strip when the text didn't
+  match exactly (e.g. `40, 22, 40, 22` or `bottom left`).
+- The WLED list is never saved with lines dropped any more (Mac and iPhone): if something can't
+  be read, nothing in the list changes and the message says what. The format also accepts spaces,
+  `bottom left` / `bottom-left` / `bl`, and `anticlockwise`.
+
 ## v0.11.0
 
 Mac app, from the first test:

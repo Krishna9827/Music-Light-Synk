@@ -49,7 +49,7 @@ public struct WledLayout: Equatable {
     }
 
     public static func parse(_ raw: String, start: Corner, clockwise: Bool) -> WledLayout? {
-        let parts = raw.split(whereSeparator: { ",; x".contains($0) }).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let parts = raw.split(whereSeparator: { ",; x/".contains($0) }).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         let n = parts.compactMap { Int($0) }
         guard n.count == 4, parts.count == 4, n.allSatisfy({ $0 >= 0 }), n.reduce(0, +) > 0, n.reduce(0, +) <= 4000 else { return nil }
         return WledLayout(top: n[0], right: n[1], bottom: n[2], left: n[3], start: start, clockwise: clockwise)
@@ -200,12 +200,16 @@ public enum WledDevices {
         var counts: String?
         var start = Corner.bottomLeft
         var cw = true
+        // Forgiving about how people type it: "40, 22, 40, 22", "bottom left", "bottom-left", "bl".
+        let short: [String: Corner] = ["tl": .topLeft, "tr": .topRight, "br": .bottomRight, "bl": .bottomLeft]
         for o in opts {
-            let lo = o.lowercased()
-            if lo.range(of: #"^\d+(,\d+){3}$"#, options: .regularExpression) != nil { counts = o }
-            else if lo == "cw" || lo == "clockwise" { cw = true }
-            else if lo == "ccw" || lo == "counterclockwise" { cw = false }
-            else if let c = Corner(rawValue: lo) { start = c }
+            let lo = o.lowercased().trimmingCharacters(in: .whitespaces)
+            let flat = lo.replacingOccurrences(of: " ", with: "")
+            let corner = lo.replacingOccurrences(of: " ", with: "_").replacingOccurrences(of: "-", with: "_")
+            if flat.range(of: #"^\d+([,x;/]\d+){3}$"#, options: .regularExpression) != nil { counts = flat }
+            else if ["cw", "clockwise"].contains(flat) { cw = true }
+            else if ["ccw", "counterclockwise", "counter-clockwise", "anticlockwise", "anti-clockwise"].contains(flat) { cw = false }
+            else if let c = Corner(rawValue: corner) ?? short[flat] { start = c }
             else { return nil }
         }
         guard let c = counts, let layout = WledLayout.parse(c, start: start, clockwise: cw) else { return nil }
